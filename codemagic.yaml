@@ -23,9 +23,11 @@ workflows:
       - name: Install dependencies
         script: flutter pub get
 
-      - name: Build signed IPA
+      - name: Build IPA (development)
         script: |
-          flutter build ipa --release
+          flutter build ipa \
+            --release \
+            --export-method development
 
     artifacts:
       - build/ios/ipa/*.ipa
