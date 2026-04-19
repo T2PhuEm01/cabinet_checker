@@ -9,7 +9,7 @@ workflows:
       flutter: stable
       xcode: latest
       vars:
-        BUNDLE_ID: com.example.cabinet_checker
+        BUNDLE_ID: com.phuem.cabinet_checker
       groups:
         - app_store_credentials
       ios_signing:
