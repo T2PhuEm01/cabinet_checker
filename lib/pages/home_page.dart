@@ -206,7 +206,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _persistWorkspace() async {
     final workspace = _buildWorkspaceState();
     await _storageService.saveWorkspace(workspace);
-    await _writeAutoBackupFile(workspace);
+    try {
+      await _writeAutoBackupFile(workspace);
+    } catch (e, st) {
+      debugPrint('Auto backup failed: $e');
+      debugPrint('$st');
+    }
   }
 
   CabinetWorkspaceState _buildWorkspaceState() {
@@ -218,27 +223,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<File> _writeAutoBackupFile(CabinetWorkspaceState workspace) async {
-    final backupDir = await _downloadPathService.getCabinetSubDirectory(
-      'backups',
-    );
     final fileName = 'cabinet_workspace_autosave.json';
-    final backupFile = File('${backupDir.path}/$fileName');
-    await backupFile.writeAsString(jsonEncode(workspace.toMap()), flush: true);
-    return backupFile;
+    return _writeBackupFileWithFallback(fileName, workspace);
   }
 
   Future<File> _writeManualBackupFile(CabinetWorkspaceState workspace) async {
-    final backupDir = await _downloadPathService.getCabinetSubDirectory(
-      'backups',
-    );
     final now = DateTime.now();
     String two(int value) => value.toString().padLeft(2, '0');
     final stamp =
         '${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}';
     final fileName = 'cabinet_workspace_backup_$stamp.json';
-    final backupFile = File('${backupDir.path}/$fileName');
-    await backupFile.writeAsString(jsonEncode(workspace.toMap()), flush: true);
-    return backupFile;
+    return _writeBackupFileWithFallback(fileName, workspace);
+  }
+
+  Future<File> _writeBackupFileWithFallback(
+    String fileName,
+    CabinetWorkspaceState workspace,
+  ) async {
+    final data = jsonEncode(workspace.toMap());
+
+    try {
+      final backupDir = await _downloadPathService.getCabinetSubDirectory(
+        'backups',
+      );
+      final backupFile = File('${backupDir.path}/$fileName');
+      await backupFile.writeAsString(data, flush: true);
+      return backupFile;
+    } on FileSystemException catch (e) {
+      debugPrint(
+        'Write backup to Download failed, fallback to app documents: $e',
+      );
+      final backupDir = await _downloadPathService.getCabinetSubDirectory(
+        'backups',
+        locationType: ExportLocationType.documents,
+      );
+      final backupFile = File('${backupDir.path}/$fileName');
+      await backupFile.writeAsString(data, flush: true);
+      return backupFile;
+    }
   }
 
   Future<void> _restoreWorkspaceFromBackup() async {
@@ -300,7 +322,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _records
         ..clear()
         ..addAll(selectedDataset?.records ?? <CabinetRecord>[]);
-      _googleAppsScriptUrl = workspace?.googleAppsScriptUrl;
+      _googleAppsScriptUrl = workspace.googleAppsScriptUrl;
     });
 
     await _persistWorkspace();
@@ -621,6 +643,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         '(${percent.toStringAsFixed(0)}%)';
   }
 
+  String _describeGoogleSyncError(Object error) {
+    if (error is FormatException) {
+      return error.message;
+    }
+    if (error is StateError) {
+      return error.message;
+    }
+    if (error is SocketException) {
+      return 'Không kết nối được mạng hoặc máy chủ Google Apps Script.';
+    }
+    if (error is TimeoutException) {
+      return 'Hết thời gian chờ đồng bộ. Vui lòng thử lại khi mạng ổn định.';
+    }
+    if (error is HttpException) {
+      return error.message;
+    }
+
+    final text = error.toString().trim();
+    if (text.isEmpty) {
+      return 'Lỗi không xác định khi đồng bộ Google Sheets.';
+    }
+
+    return text.startsWith('Exception: ')
+        ? text.replaceFirst('Exception: ', '')
+        : text;
+  }
+
   Future<void> _exportReports() async {
     final options = await showExportOptionsDialog(
       context: context,
@@ -657,61 +706,85 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final cancelToken = ExportCancelToken();
 
     _activeExportCancelToken = cancelToken;
-    var progressDialogShown = false;
+    var progressDialogVisible = false;
+    var closeProgressDialogRequested = false;
+
+    void requestCloseProgressDialog() {
+      closeProgressDialogRequested = true;
+      if (!mounted || !progressDialogVisible) return;
+      Navigator.of(context, rootNavigator: true).pop();
+    }
 
     if (mounted) {
-      progressDialogShown = true;
       unawaited(
         showDialog<void>(
           context: context,
           barrierDismissible: false,
-          builder: (_) => WillPopScope(
-            onWillPop: () async => false,
-            child: AlertDialog(
-              title: const Text('Đang đồng bộ Google Sheets'),
-              content: ValueListenableBuilder<String>(
-                valueListenable: progressLabel,
-                builder: (context, label, __) {
-                  return ValueListenableBuilder<double>(
-                    valueListenable: progress,
-                    builder: (context, value, ___) {
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          LinearProgressIndicator(value: value),
-                          const SizedBox(height: 12),
-                          Text(label),
-                        ],
-                      );
-                    },
-                  );
-                },
-              ),
-              actions: [
-                ValueListenableBuilder<bool>(
-                  valueListenable: isCancelRequested,
-                  builder: (context, requested, _) {
-                    return TextButton(
-                      onPressed: requested
-                          ? null
-                          : () {
-                              isCancelRequested.value = true;
-                              progressLabel.value = _buildExportProgressLabel(
-                                'Đang gửi yêu cầu hủy, vui lòng chờ...',
-                                displayedBytes.value,
-                                estimatedTotalBytes,
-                              );
-                              cancelToken.cancel();
-                            },
-                      child: Text(requested ? 'Đang hủy...' : 'Hủy đồng bộ'),
+          builder: (_) {
+            progressDialogVisible = true;
+            if (closeProgressDialogRequested) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted || !progressDialogVisible) return;
+                Navigator.of(context, rootNavigator: true).pop();
+              });
+            }
+            return WillPopScope(
+              onWillPop: () async => false,
+              child: AlertDialog(
+                title: const Text('Đang đồng bộ Google Sheets'),
+                content: ValueListenableBuilder<String>(
+                  valueListenable: progressLabel,
+                  builder: (context, label, __) {
+                    return ValueListenableBuilder<double>(
+                      valueListenable: progress,
+                      builder: (context, value, ___) {
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            LinearProgressIndicator(value: value),
+                            const SizedBox(height: 12),
+                            Text(label),
+                          ],
+                        );
+                      },
                     );
                   },
                 ),
-              ],
-            ),
-          ),
-        ),
+                actions: [
+                  ValueListenableBuilder<bool>(
+                    valueListenable: isCancelRequested,
+                    builder: (context, requested, _) {
+                      return TextButton(
+                        onPressed: requested
+                            ? null
+                            : () {
+                                isCancelRequested.value = true;
+                                progressLabel.value = _buildExportProgressLabel(
+                                  'Đang gửi yêu cầu hủy, vui lòng chờ...',
+                                  displayedBytes.value,
+                                  estimatedTotalBytes,
+                                );
+                                cancelToken.cancel();
+                              },
+                        child: Text(requested ? 'Đang hủy...' : 'Hủy đồng bộ'),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            );
+          },
+        ).whenComplete(() {
+          progressDialogVisible = false;
+        }),
+      );
+      unawaited(
+        Future<void>.delayed(Duration.zero).then((_) {
+          if (closeProgressDialogRequested) {
+            requestCloseProgressDialog();
+          }
+        }),
       );
     }
 
@@ -755,9 +828,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       displayedBytes.value = estimatedTotalBytes;
       progress.value = 1.0;
 
-      if (progressDialogShown && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
+      requestCloseProgressDialog();
 
       _showStatusMessage(
         'Đã đồng bộ Google Sheets thành công vào tab "$sheetName": '
@@ -765,21 +836,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
 
       await _persistWorkspace();
-    } catch (e) {
+    } catch (e, st) {
       if (e is ExportCanceledException) {
-        if (progressDialogShown && mounted) {
-          Navigator.of(context, rootNavigator: true).pop();
-        }
+        requestCloseProgressDialog();
         _showStatusMessage('Đã hủy đồng bộ dữ liệu.');
         return;
       }
-      if (progressDialogShown && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
+      requestCloseProgressDialog();
+      debugPrint('Google Sheets sync failed: $e');
+      debugPrint('$st');
       _showStatusMessage(
-        'Đồng bộ Google Sheets thất bại. Vui lòng không thoát app khi đang export',
+        'Đồng bộ Google Sheets thất bại: ${_describeGoogleSyncError(e)}',
       );
     } finally {
+      progressDialogVisible = false;
       progress.dispose();
       displayedBytes.dispose();
       progressLabel.dispose();
@@ -914,7 +984,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                     ],
                   ),
-                  if (_isBusy) const LinearProgressIndicator(),
+                  if (_isBusy)
+                    const LinearProgressIndicator(color: colorViettel),
                   vSpacer10(),
                   Align(
                     alignment: Alignment.centerLeft,

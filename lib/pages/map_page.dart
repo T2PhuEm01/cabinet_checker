@@ -99,7 +99,7 @@ class _MapPageState extends State<MapPage> {
   static const double _recenterDistanceThresholdMeters = 250;
   static const double _maxInteractiveZoom = 22;
   static const Duration _minLocationUiUpdateInterval = Duration(
-    milliseconds: 350,
+    milliseconds: 100,
   );
 
   @override
@@ -122,51 +122,43 @@ class _MapPageState extends State<MapPage> {
   void _startLocationTracking() {
     const settings = LocationSettings(
       accuracy: LocationAccuracy.high,
-      distanceFilter: 2,
+      distanceFilter: 5,
     );
 
     _positionSub = Geolocator.getPositionStream(locationSettings: settings)
         .listen((position) {
           if (!mounted) return;
 
-          // Avoid rebuilding the whole map while search UI/keyboard is active.
+          // Update position state directly without full page rebuild
+          _liveUserPos = position;
+          if (position.heading >= 0) {
+            _headingDeg = position.heading;
+          }
+
+          // Avoid moving map center while search UI/keyboard is active.
           if (_isSearchOpen) {
-            _liveUserPos = position;
-            if (position.heading >= 0) {
-              _headingDeg = position.heading;
-            }
             return;
           }
 
           final now = DateTime.now();
-          final canUpdateUiByInterval =
+          final canMoveCameraByInterval =
               _lastLocationUiUpdateAt == null ||
               now.difference(_lastLocationUiUpdateAt!) >=
                   _minLocationUiUpdateInterval;
 
-          if (canUpdateUiByInterval) {
-            setState(() {
-              _liveUserPos = position;
-              if (position.heading >= 0) {
-                _headingDeg = position.heading;
-              }
-            });
-            _lastLocationUiUpdateAt = now;
-          } else {
-            _liveUserPos = position;
-            if (position.heading >= 0) {
-              _headingDeg = position.heading;
+          if (canMoveCameraByInterval) {
+            if (_followUser) {
+              _mapController.move(
+                LatLng(position.latitude, position.longitude),
+                _mapController.camera.zoom,
+              );
             }
-          }
-
-          if (_followUser) {
-            _showRecenterButton = false;
-            _mapController.move(
-              LatLng(position.latitude, position.longitude),
-              _mapController.camera.zoom,
-            );
-          } else {
+            _lastLocationUiUpdateAt = now;
             _updateRecenterVisibility(_mapController.camera.center);
+            // Rebuild UI only on debounced interval for map state updates
+            if (mounted) {
+              setState(() {});
+            }
           }
         });
   }
