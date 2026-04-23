@@ -71,12 +71,29 @@ class ExportService {
       cancelToken?.throwIfCanceled();
       final photoNames = <String>[];
       final photoPaths = <String>[];
-      for (final photo in record.photos) {
+      for (
+        var photoIndex = 0;
+        photoIndex < record.photos.length;
+        photoIndex++
+      ) {
+        final photo = record.photos[photoIndex];
         cancelToken?.throwIfCanceled();
         final sourceFile = File(photo.path);
         if (sourceFile.existsSync()) {
-          photoNames.add(sourceFile.path.split(Platform.pathSeparator).last);
-          photoPaths.add(sourceFile.path);
+          try {
+            await sourceFile.length();
+            photoNames.add(
+              _buildPhotoFileName(
+                cabinetCode: record.id,
+                sourcePath: sourceFile.path,
+                photoIndex: photoIndex,
+                photoCount: record.photos.length,
+              ),
+            );
+            photoPaths.add(sourceFile.path);
+          } on FileSystemException {
+            continue;
+          }
         }
       }
       photoInfoMap[record.id] = photoNames;
@@ -375,6 +392,33 @@ class ExportService {
     return Isolate.run(
       () => _createPhotoCollageWorker(photoPaths, imageMode.index),
     );
+  }
+
+  String _buildPhotoFileName({
+    required String cabinetCode,
+    required String sourcePath,
+    required int photoIndex,
+    required int photoCount,
+  }) {
+    final safeCabinetCode = _sanitizeFileName(cabinetCode);
+    final extension = _extractFileExtension(sourcePath);
+    if (photoCount <= 1) {
+      return '$safeCabinetCode$extension';
+    }
+    return '${safeCabinetCode}_${photoIndex + 1}$extension';
+  }
+
+  String _sanitizeFileName(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return 'cabinet';
+    return trimmed.replaceAll(RegExp(r'[\\/:*?"<>|\s]+'), '_');
+  }
+
+  String _extractFileExtension(String sourcePath) {
+    final filename = sourcePath.split(Platform.pathSeparator).last;
+    final dotIndex = filename.lastIndexOf('.');
+    if (dotIndex <= 0 || dotIndex == filename.length - 1) return '';
+    return filename.substring(dotIndex);
   }
 }
 

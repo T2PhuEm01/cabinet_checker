@@ -92,6 +92,7 @@ class CameraService {
     final sourceFile = File(sourcePath);
     final imagesDir = await _downloadPathService.getCabinetSubDirectory(
       'images',
+      locationType: ExportLocationType.documents,
     );
     final filename = sourcePath.split(Platform.pathSeparator).last;
     final targetPath =

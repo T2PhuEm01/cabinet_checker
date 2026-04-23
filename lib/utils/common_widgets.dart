@@ -149,6 +149,37 @@ Widget dropDownListIndex(
   );
 }
 
+Widget handleNetworkViewWithLoading({double height = 50, String? message}) {
+  message = message ?? "No internet".tr;
+  return Container(
+    height: height,
+    decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5)),
+    child: Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: Dimens.iconSizeMid36,
+            height: Dimens.iconSizeMid36,
+            child: CircularProgressIndicator(
+              color: Colors.white,
+              strokeWidth: 3,
+            ),
+          ),
+          TextRobotoAutoNormal(
+            message,
+            color: Colors.white,
+            fontSize: Dimens.regularFontSizeMid,
+            maxLines: 3,
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 Widget dropDownListStringBottomSheet(
   BuildContext context,
   List<String> items,

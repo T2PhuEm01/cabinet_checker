@@ -185,7 +185,7 @@ class _MapPageState extends State<MapPage> {
     FocusScope.of(context).unfocus();
 
     setState(() {
-      _followUser = false;
+      _followUser = true;
     });
 
     final target = LatLng(record.latitudeRef, record.longitudeRef);
@@ -503,9 +503,6 @@ class _MapPageState extends State<MapPage> {
                   onPositionChanged: (camera, hasGesture) {
                     _currentZoom = camera.zoom;
                     _updateRecenterVisibility(camera.center);
-                    if (hasGesture && _followUser) {
-                      setState(() => _followUser = false);
-                    }
                   },
                 ),
                 children: [

@@ -51,12 +51,27 @@ class GoogleSheetsSyncService {
       final record = records[i];
       final photosPayload = <Map<String, dynamic>>[];
 
-      for (final photo in record.photos) {
+      for (
+        var photoIndex = 0;
+        photoIndex < record.photos.length;
+        photoIndex++
+      ) {
+        final photo = record.photos[photoIndex];
         cancelToken?.throwIfCanceled();
         final file = File(photo.path);
         if (!file.existsSync()) continue;
-        final bytes = await _awaitCancellable(file.readAsBytes(), cancelToken);
-        final fileName = file.path.split(Platform.pathSeparator).last;
+        late final List<int> bytes;
+        try {
+          bytes = await _awaitCancellable(file.readAsBytes(), cancelToken);
+        } on FileSystemException {
+          continue;
+        }
+        final fileName = _buildPhotoFileName(
+          cabinetCode: record.id,
+          sourcePath: file.path,
+          photoIndex: photoIndex,
+          photoCount: record.photos.length,
+        );
         photosPayload.add(<String, dynamic>{
           'name': fileName,
           'mimeType': _guessMimeType(fileName),
@@ -212,6 +227,33 @@ class GoogleSheetsSyncService {
       future,
       token.whenCanceled.then<T>((_) => throw const ExportCanceledException()),
     ]);
+  }
+
+  String _buildPhotoFileName({
+    required String cabinetCode,
+    required String sourcePath,
+    required int photoIndex,
+    required int photoCount,
+  }) {
+    final safeCabinetCode = _sanitizeFileName(cabinetCode);
+    final extension = _extractFileExtension(sourcePath);
+    if (photoCount <= 1) {
+      return '$safeCabinetCode$extension';
+    }
+    return '${safeCabinetCode}_${photoIndex + 1}$extension';
+  }
+
+  String _sanitizeFileName(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return 'cabinet';
+    return trimmed.replaceAll(RegExp(r'[\\/:*?"<>|\s]+'), '_');
+  }
+
+  String _extractFileExtension(String sourcePath) {
+    final filename = sourcePath.split(Platform.pathSeparator).last;
+    final dotIndex = filename.lastIndexOf('.');
+    if (dotIndex <= 0 || dotIndex == filename.length - 1) return '';
+    return filename.substring(dotIndex);
   }
 
   bool _isRedirectStatus(int statusCode) {

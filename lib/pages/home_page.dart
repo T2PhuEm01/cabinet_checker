@@ -18,6 +18,7 @@ import 'package:cabinet_checker/utils/text_util.dart';
 import 'package:cabinet_checker/widgets/cabinet_table.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
+import 'package:flutter_background/flutter_background.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 
@@ -210,6 +211,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _writeAutoBackupFile(workspace);
     } catch (e, st) {
       debugPrint('Auto backup failed: $e');
+      debugPrint('$st');
+    }
+  }
+
+  Future<bool> _enableBackgroundExecutionForExport() async {
+    if (!Platform.isAndroid) return false;
+
+    try {
+      final initialized = await FlutterBackground.initialize(
+        androidConfig: const FlutterBackgroundAndroidConfig(
+          notificationTitle: 'Cabinet Checker',
+          notificationText: 'Đang đồng bộ Google Sheets...',
+          notificationImportance: AndroidNotificationImportance.normal,
+          enableWifiLock: true,
+        ),
+      );
+      if (!initialized) return false;
+      return FlutterBackground.enableBackgroundExecution();
+    } catch (e, st) {
+      debugPrint('Failed to enable background export: $e');
+      debugPrint('$st');
+      return false;
+    }
+  }
+
+  Future<void> _disableBackgroundExecutionForExport() async {
+    if (!Platform.isAndroid) return;
+
+    try {
+      if (FlutterBackground.isBackgroundExecutionEnabled) {
+        await FlutterBackground.disableBackgroundExecution();
+      }
+    } catch (e, st) {
+      debugPrint('Failed to disable background export: $e');
       debugPrint('$st');
     }
   }
@@ -514,39 +549,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<bool> _onWillPop() async {
-    if (!_isExportingInProgress) return true;
-
-    final shouldCancelAndExit = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Đang xuất dữ liệu'),
-        content: const Text(
-          'Ứng dụng đang đồng bộ báo cáo nên chưa thể thoát ngay. '
-          'Bạn có muốn dừng xuất rồi thoát không?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Tiếp tục xuất'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Dừng xuất'),
-          ),
-        ],
-      ),
-    );
-
-    if (shouldCancelAndExit == true) {
-      _activeExportCancelToken?.cancel();
-      _showStatusMessage('Đang dừng xuất dữ liệu...');
-    } else {
+    if (_isExportingInProgress) {
       _showStatusMessage(
-        'Đang xuất dữ liệu. Hãy dừng xuất trước khi thoát app.',
+        'Đang xuất dữ liệu nền. Bạn có thể thoát app, tiến trình vẫn tiếp tục.',
       );
     }
 
-    return false;
+    return true;
   }
 
   String _defaultGoogleSheetTabName() {
@@ -617,8 +626,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (final photo in record.photos) {
         final file = File(photo.path);
         if (!file.existsSync()) continue;
-        final length = await file.length();
-        total += (length * 1.4).round();
+        try {
+          final length = await file.length();
+          total += (length * 1.4).round();
+        } on FileSystemException {
+          continue;
+        }
       }
     }
     return total;
@@ -683,6 +696,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (exportRecords.isEmpty) {
       _showStatusMessage('Không có dữ liệu phù hợp với điều kiện xuất.');
       return;
+    }
+
+    final backgroundEnabled = await _enableBackgroundExecutionForExport();
+    if (!backgroundEnabled) {
+      _showStatusMessage(
+        'Không bật được chế độ chạy nền, export sẽ chạy bình thường khi app còn mở.',
+      );
     }
 
     setState(() {
@@ -849,6 +869,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'Đồng bộ Google Sheets thất bại: ${_describeGoogleSyncError(e)}',
       );
     } finally {
+      if (backgroundEnabled) {
+        await _disableBackgroundExecutionForExport();
+      }
       progressDialogVisible = false;
       progress.dispose();
       displayedBytes.dispose();
