@@ -29,6 +29,7 @@ import '../services/export_cancel_token.dart';
 import '../services/download_path_service.dart';
 import '../services/google_sheets_sync_service.dart';
 import '../services/ios_background_task_service.dart';
+import '../services/export_notification_service.dart';
 import '../services/storage_service.dart';
 import 'cabinet_detail_page.dart';
 import 'export/export_options_dialog.dart';
@@ -51,6 +52,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final DownloadPathService _downloadPathService = DownloadPathService();
   final IosBackgroundTaskService _iosBackgroundTaskService =
       IosBackgroundTaskService();
+  final ExportNotificationService _exportNotificationService =
+      ExportNotificationService();
   final StorageService _storageService = StorageService();
 
   static const List<String> _statusFilterLabels = <String>[
@@ -88,6 +91,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   HomeTableSortState _tableSortState = const HomeTableSortState.none();
 
   InspectionStatus? _statusFilter;
+  DateTime? _checkedDateFilter;
   String? _selectedDatasetId;
   bool _isBusy = false;
   bool _isExportingInProgress = false;
@@ -446,6 +450,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _statusFilter == null || record.inspectionStatus == _statusFilter;
       if (!statusOk) return false;
 
+      if (_statusFilter == InspectionStatus.checked &&
+          _checkedDateFilter != null) {
+        final checkedAt = record.lastCheckedAt?.toLocal();
+        if (checkedAt == null) return false;
+        final sameDay =
+            checkedAt.year == _checkedDateFilter!.year &&
+            checkedAt.month == _checkedDateFilter!.month &&
+            checkedAt.day == _checkedDateFilter!.day;
+        if (!sameDay) return false;
+      }
+
       if (query.isEmpty) return true;
       final searchText = '${record.id} ${record.name} ${record.route}'
           .toLowerCase();
@@ -474,6 +489,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (value == null) return '-';
     if (value >= 1000) return '${(value / 1000).toStringAsFixed(2)} km';
     return '${value.toStringAsFixed(0)} m';
+  }
+
+  String _formatDateOnly(DateTime value) {
+    String twoDigits(int n) => n.toString().padLeft(2, '0');
+    return '${twoDigits(value.day)}/${twoDigits(value.month)}/${value.year}';
+  }
+
+  DateTime _normalizeDate(DateTime value) {
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  Future<void> _pickCheckedDateFilter() async {
+    final now = DateTime.now();
+    final base = _checkedDateFilter ?? _normalizeDate(now);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: base,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null) return;
+    if (!mounted) return;
+    setState(() {
+      _checkedDateFilter = _normalizeDate(picked);
+    });
+    _showStatusMessage(
+      'Đã chọn ngày kiểm: ${_formatDateOnly(_checkedDateFilter!)}',
+    );
   }
 
   Future<void> _refreshCurrentLocation() async {
@@ -641,15 +684,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final checkedAt = record.lastCheckedAt;
       if (checkedAt == null) return false;
+      final checkedAtLocal = checkedAt.toLocal();
 
-      if (fromBoundary != null && checkedAt.isBefore(fromBoundary)) {
+      if (fromBoundary != null && checkedAtLocal.isBefore(fromBoundary)) {
         return false;
       }
-      if (toBoundary != null && checkedAt.isAfter(toBoundary)) {
+      if (toBoundary != null && checkedAtLocal.isAfter(toBoundary)) {
         return false;
       }
       return true;
     }).toList();
+  }
+
+  CabinetRecord _cloneRecordForExport(CabinetRecord record) {
+    // Freeze a snapshot to avoid live edits changing data mid-export.
+    return CabinetRecord.fromMap(record.toMap());
   }
 
   Future<int> _estimateGoogleSyncBytes(List<CabinetRecord> records) async {
@@ -725,7 +774,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     if (options == null) return;
 
-    final exportRecords = _buildExportRecords(options);
+    final exportRecords = _buildExportRecords(
+      options,
+    ).map(_cloneRecordForExport).toList(growable: false);
     if (exportRecords.isEmpty) {
       _showStatusMessage('Không có dữ liệu phù hợp với điều kiện xuất.');
       return;
@@ -746,6 +797,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _isBusy = true;
       _isExportingInProgress = true;
     });
+
+    if (backgroundEnabled && Platform.isAndroid) {
+      await _exportNotificationService.show(
+        title: 'CabCheck - Đang xuất dữ liệu',
+        text: 'Đang chuẩn bị đồng bộ Google Sheets...',
+        indeterminate: true,
+      );
+    }
 
     final estimatedTotalBytes = await _estimateGoogleSyncBytes(exportRecords);
     final progress = ValueNotifier<double>(0.0);
@@ -877,6 +936,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             displayedBytes.value,
             estimatedTotalBytes,
           );
+          if (backgroundEnabled && Platform.isAndroid) {
+            final percent = (value * 100).round().clamp(0, 100);
+            unawaited(
+              _exportNotificationService.update(
+                title: 'CabCheck - Đang xuất dữ liệu',
+                text: event.message,
+                progress: percent,
+              ),
+            );
+          }
         },
       );
 
@@ -887,6 +956,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       requestCloseProgressDialog();
 
+      if (backgroundEnabled && Platform.isAndroid) {
+        await _exportNotificationService.cancel();
+      }
+
       _showStatusMessage(
         'Đã đồng bộ Google Sheets thành công vào tab "$sheetName": '
         '$uploadedCount/${exportRecords.length} bản ghi.',
@@ -896,16 +969,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (e, st) {
       if (e is ExportCanceledException) {
         requestCloseProgressDialog();
+        if (backgroundEnabled && Platform.isAndroid) {
+          await _exportNotificationService.cancel();
+        }
         _showStatusMessage('Đã hủy đồng bộ dữ liệu.');
         return;
       }
       requestCloseProgressDialog();
+      if (backgroundEnabled && Platform.isAndroid) {
+        await _exportNotificationService.cancel();
+      }
       debugPrint('Google Sheets sync failed: $e');
       debugPrint('$st');
       _showStatusMessage(
         'Đồng bộ Google Sheets thất bại: ${_describeGoogleSyncError(e)}',
       );
     } finally {
+      if (backgroundEnabled && Platform.isAndroid) {
+        await _exportNotificationService.cancel();
+      }
       if (backgroundEnabled) {
         await _disableBackgroundExecutionForExport();
       }
@@ -1051,52 +1133,95 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   if (_isBusy)
                     const LinearProgressIndicator(color: colorViettel),
                   vSpacer10(),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: SizedBox(
-                      width: 220,
-                      child: Container(
-                        height: 50,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: lightDivider),
-                          borderRadius: BorderRadius.circular(
-                            Dimens.radiusCornerSmall,
-                          ),
-                        ),
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<InspectionStatus?>(
-                            isDense: true,
-                            value: _statusFilter,
-                            hint: TextRobotoAutoNormal(
-                              'Tất cả',
-                              fontSize: Dimens.regularFontSizeExtraMid,
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 220,
+                        child: Container(
+                          height: 50,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: lightDivider),
+                            borderRadius: BorderRadius.circular(
+                              Dimens.radiusCornerSmall,
                             ),
-                            icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                            borderRadius: BorderRadius.circular(12),
-                            items:
-                                List<
-                                  DropdownMenuItem<InspectionStatus?>
-                                >.generate(
-                                  _statusFilterValues.length,
-                                  (index) =>
-                                      DropdownMenuItem<InspectionStatus?>(
-                                        value: _statusFilterValues[index],
-                                        child: TextRobotoAutoNormal(
-                                          _statusFilterLabels[index],
-                                          fontSize:
-                                              Dimens.regularFontSizeExtraMid,
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<InspectionStatus?>(
+                              isDense: true,
+                              value: _statusFilter,
+                              hint: TextRobotoAutoNormal(
+                                'Tất cả',
+                                fontSize: Dimens.regularFontSizeExtraMid,
+                              ),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                              ),
+                              borderRadius: BorderRadius.circular(12),
+                              items:
+                                  List<
+                                    DropdownMenuItem<InspectionStatus?>
+                                  >.generate(
+                                    _statusFilterValues.length,
+                                    (index) =>
+                                        DropdownMenuItem<InspectionStatus?>(
+                                          value: _statusFilterValues[index],
+                                          child: TextRobotoAutoNormal(
+                                            _statusFilterLabels[index],
+                                            fontSize:
+                                                Dimens.regularFontSizeExtraMid,
+                                          ),
                                         ),
-                                      ),
-                                ),
-                            onChanged: (value) => setState(() {
-                              _statusFilter = value;
-                            }),
+                                  ),
+                              onChanged: (value) => setState(() {
+                                _statusFilter = value;
+                                if (value == InspectionStatus.checked) {
+                                  _checkedDateFilter ??= _normalizeDate(
+                                    DateTime.now(),
+                                  );
+                                } else {
+                                  _checkedDateFilter = null;
+                                }
+                              }),
+                            ),
                           ),
                         ),
                       ),
-                    ),
+                      if (_statusFilter == InspectionStatus.checked) ...[
+                        hSpacer10(),
+                        Expanded(
+                          child: buttonOnlyIcon(
+                            onPress: _pickCheckedDateFilter,
+                            iconData: Icons.calendar_month,
+                            iconColor: colorViettel.withValues(alpha: 0.5),
+                            size: Dimens.iconSizeMid,
+                            visualDensity: minimumVisualDensity,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Xóa lọc ngày',
+                          onPressed: () {
+                            setState(() {
+                              _checkedDateFilter = null;
+                            });
+                          },
+                          icon: const Icon(Icons.clear),
+                        ),
+                      ],
+                    ],
                   ),
+                  if (_statusFilter == InspectionStatus.checked &&
+                      _checkedDateFilter != null)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: TextRobotoAutoNormal(
+                          'Đang lọc ngày kiểm: ${_formatDateOnly(_checkedDateFilter!)}',
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
                   vSpacer10(),
                   textFieldWithWidget(
                     controller: _controller.searchController,

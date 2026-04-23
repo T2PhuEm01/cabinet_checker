@@ -1,14 +1,19 @@
-package com.example.cabinet_checker
+package com.phuem.cabinet_checker
 
 import android.app.Activity
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -24,9 +29,12 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val CHANNEL = "camera_chooser"
+        private const val EXPORT_NOTIFICATION_CHANNEL = "cabinet_checker/export_notification"
         private const val REQUEST_CAMERA_CHOOSER = 1001
         private const val REQUEST_CAMERA_PERMISSION = 1002
         private const val TAG = "CabinetCameraChooser"
+        private const val EXPORT_NOTIFICATION_CHANNEL_ID = "cabcheck_export_channel"
+        private const val EXPORT_NOTIFICATION_ID = 3101
     }
 
     private var pendingResult: MethodChannel.Result? = null
@@ -46,6 +54,97 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, EXPORT_NOTIFICATION_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "showExportNotification", "updateExportNotification" -> {
+                        val title = call.argument<String>("title") ?: "CabCheck"
+                        val text = call.argument<String>("text") ?: "Đang xuất dữ liệu..."
+                        val progress = call.argument<Int>("progress")
+                        val indeterminate = call.argument<Boolean>("indeterminate") ?: false
+                        val shown = showOrUpdateExportNotification(
+                            title = title,
+                            text = text,
+                            progress = progress,
+                            indeterminate = indeterminate
+                        )
+                        result.success(shown)
+                    }
+
+                    "cancelExportNotification" -> {
+                        cancelExportNotification()
+                        result.success(true)
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun showOrUpdateExportNotification(
+        title: String,
+        text: String,
+        progress: Int?,
+        indeterminate: Boolean,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                Log.w(TAG, "POST_NOTIFICATIONS not granted, skip export notification")
+                return false
+            }
+        }
+
+        ensureExportNotificationChannel()
+
+        val safeProgress = progress?.coerceIn(0, 100)
+        val builder = NotificationCompat.Builder(this, EXPORT_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setSilent(true)
+
+        if (indeterminate) {
+            builder.setProgress(100, 0, true)
+        } else if (safeProgress != null) {
+            builder.setProgress(100, safeProgress, false)
+        } else {
+            builder.setProgress(0, 0, false)
+        }
+
+        NotificationManagerCompat.from(this).notify(EXPORT_NOTIFICATION_ID, builder.build())
+        return true
+    }
+
+    private fun cancelExportNotification() {
+        NotificationManagerCompat.from(this).cancel(EXPORT_NOTIFICATION_ID)
+    }
+
+    private fun ensureExportNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        val existing = manager.getNotificationChannel(EXPORT_NOTIFICATION_CHANNEL_ID)
+        if (existing != null) return
+
+        val channel = NotificationChannel(
+            EXPORT_NOTIFICATION_CHANNEL_ID,
+            "CabCheck Export",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Thông báo tiến trình xuất dữ liệu nền"
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(channel)
     }
 
     private fun captureWithChooser(result: MethodChannel.Result) {

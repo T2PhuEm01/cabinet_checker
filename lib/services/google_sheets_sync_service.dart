@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 
 import '../models/cabinet_record.dart';
@@ -15,6 +16,9 @@ typedef GoogleSheetsSyncProgressCallback =
     void Function(GoogleSheetsSyncProgress progress);
 
 class GoogleSheetsSyncService {
+  static const int _maxUploadAttempts = 3;
+  static const Duration _singleRecordTimeout = Duration(seconds: 300);
+
   Future<int> syncRecords({
     required String appsScriptUrl,
     required String sheetName,
@@ -50,6 +54,8 @@ class GoogleSheetsSyncService {
       cancelToken?.throwIfCanceled();
       final record = records[i];
       final photosPayload = <Map<String, dynamic>>[];
+      final photoNames = <String>[];
+      final photoLocalPaths = <String>[];
 
       for (
         var photoIndex = 0;
@@ -72,10 +78,16 @@ class GoogleSheetsSyncService {
           photoIndex: photoIndex,
           photoCount: record.photos.length,
         );
+        photoNames.add(fileName);
+        photoLocalPaths.add(photo.path);
         photosPayload.add(<String, dynamic>{
           'name': fileName,
           'mimeType': _guessMimeType(fileName),
           'base64': base64Encode(bytes),
+          // Backward-compatible aliases for older Apps Script payload parsers.
+          'data': base64Encode(bytes),
+          'content': base64Encode(bytes),
+          'path': photo.path,
           'capturedAt': photo.capturedAt.toIso8601String(),
           'latitude': photo.latitude,
           'longitude': photo.longitude,
@@ -108,19 +120,32 @@ class GoogleSheetsSyncService {
           'notes': record.notes,
           'inspectorName': record.inspectorName,
           'lastCheckedAt': record.lastCheckedAt?.toIso8601String(),
+          // Compatibility fields some scripts use to render photo columns.
+          'photoCount': record.photos.length,
+          'photoNames': photoNames,
+          'photoLocalPaths': photoLocalPaths,
         },
+        'photoCount': record.photos.length,
+        'photoNames': photoNames,
+        'photoLocalPaths': photoLocalPaths,
         'photos': photosPayload,
       };
 
-      final response = await _postJson(
-        uri,
-        body,
+      await _uploadRecordWithRetry(
+        uri: uri,
+        body: body,
+        expectedPhotoCount: photosPayload.length,
         cancelToken: cancelToken,
-      ).timeout(const Duration(seconds: 180));
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(_buildHttpErrorMessage(uri, response));
-      }
+        onRetry: (attempt, maxAttempts) {
+          onProgress?.call(
+            GoogleSheetsSyncProgress(
+              value: (0.03 + ((i / total) * 0.9)).clamp(0.03, 0.94),
+              message:
+                  'Bản ghi ${i + 1}/$total lỗi tạm thời, thử lại lần $attempt/$maxAttempts...',
+            ),
+          );
+        },
+      );
 
       successCount += 1;
       final done = i + 1;
@@ -141,6 +166,65 @@ class GoogleSheetsSyncService {
     );
 
     return successCount;
+  }
+
+  Future<void> _uploadRecordWithRetry({
+    required Uri uri,
+    required Map<String, dynamic> body,
+    required int expectedPhotoCount,
+    ExportCancelToken? cancelToken,
+    void Function(int attempt, int maxAttempts)? onRetry,
+  }) async {
+    for (var attempt = 1; attempt <= _maxUploadAttempts; attempt++) {
+      cancelToken?.throwIfCanceled();
+      try {
+        final response = await _postJson(
+          uri,
+          body,
+          cancelToken: cancelToken,
+        ).timeout(_singleRecordTimeout);
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          _validateSuccessfulBody(
+            uri: uri,
+            body: response.body,
+            expectedPhotoCount: expectedPhotoCount,
+          );
+          return;
+        }
+
+        if (_isRetryableStatus(response.statusCode) &&
+            attempt < _maxUploadAttempts) {
+          onRetry?.call(attempt + 1, _maxUploadAttempts);
+          await _awaitRetryDelay(attempt, cancelToken);
+          continue;
+        }
+
+        throw HttpException(_buildHttpErrorMessage(uri, response));
+      } on ExportCanceledException {
+        rethrow;
+      } on TimeoutException {
+        if (attempt >= _maxUploadAttempts) {
+          rethrow;
+        }
+        onRetry?.call(attempt + 1, _maxUploadAttempts);
+        await _awaitRetryDelay(attempt, cancelToken);
+      } on SocketException {
+        if (attempt >= _maxUploadAttempts) {
+          rethrow;
+        }
+        onRetry?.call(attempt + 1, _maxUploadAttempts);
+        await _awaitRetryDelay(attempt, cancelToken);
+      }
+    }
+  }
+
+  Future<void> _awaitRetryDelay(int attempt, ExportCancelToken? cancelToken) {
+    final delaySeconds = attempt.clamp(1, 4);
+    return _awaitCancellable(
+      Future<void>.delayed(Duration(seconds: delaySeconds)),
+      cancelToken,
+    );
   }
 
   Future<_HttpResponseData> _postJson(
@@ -229,6 +313,49 @@ class GoogleSheetsSyncService {
     ]);
   }
 
+  void _validateSuccessfulBody({
+    required Uri uri,
+    required String body,
+    required int expectedPhotoCount,
+  }) {
+    if (body.trim().isEmpty) return;
+    Map<String, dynamic>? decoded;
+    try {
+      final raw = jsonDecode(body);
+      if (raw is Map<String, dynamic>) {
+        decoded = raw;
+      } else if (raw is Map) {
+        decoded = Map<String, dynamic>.from(raw);
+      }
+    } catch (_) {
+      return;
+    }
+    if (decoded == null) return;
+
+    final ok = decoded['ok'];
+    if (ok == false) {
+      final error = (decoded['error'] ?? 'Unknown Apps Script error')
+          .toString();
+      throw HttpException('Google Apps Script báo lỗi: $error');
+    }
+
+    if (expectedPhotoCount <= 0) return;
+    final photosUploaded = _asInt(decoded['photosUploaded']);
+    if (photosUploaded != null && photosUploaded == 0) {
+      throw HttpException(
+        'Không tạo được link ảnh trên Google Drive dù bản ghi có ảnh. '
+        'Hãy kiểm tra quyền Drive trong Apps Script và dùng bản script mới nhất. URL hiện tại: $uri',
+      );
+    }
+  }
+
+  int? _asInt(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
+  }
+
   String _buildPhotoFileName({
     required String cabinetCode,
     required String sourcePath,
@@ -262,6 +389,15 @@ class GoogleSheetsSyncService {
         statusCode == HttpStatus.seeOther ||
         statusCode == HttpStatus.temporaryRedirect ||
         statusCode == HttpStatus.permanentRedirect;
+  }
+
+  bool _isRetryableStatus(int statusCode) {
+    return statusCode == HttpStatus.requestTimeout ||
+        statusCode == HttpStatus.tooManyRequests ||
+        statusCode == HttpStatus.internalServerError ||
+        statusCode == HttpStatus.badGateway ||
+        statusCode == HttpStatus.serviceUnavailable ||
+        statusCode == HttpStatus.gatewayTimeout;
   }
 
   void _validateAppsScriptUri(Uri uri) {
