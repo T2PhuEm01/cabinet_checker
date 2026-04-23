@@ -9,10 +9,7 @@ import 'package:xml/xml.dart';
 import '../models/cabinet_record.dart';
 
 class ImportedCabinetFile {
-  ImportedCabinetFile({
-    required this.fileName,
-    required this.records,
-  });
+  ImportedCabinetFile({required this.fileName, required this.records});
 
   final String fileName;
   final List<CabinetRecord> records;
@@ -20,25 +17,36 @@ class ImportedCabinetFile {
 
 class KmzService {
   Future<ImportedCabinetFile?> importKmz() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['kmz', 'kml'],
+    final isIos = Platform.isIOS;
+    final result = await FilePicker.platform.pickFiles(
+      type: isIos ? FileType.any : FileType.custom,
+      allowedExtensions: isIos ? null : ['kmz', 'kml'],
+      withData: true,
     );
 
     if (result == null) return null;
 
-    final fileName = result.files.single.name;
-    final filePath = result.files.single.path;
-    if (filePath == null) return null;
+    final picked = result.files.single;
+    final fileName = picked.name;
+    final lowercaseName = fileName.toLowerCase();
+    final isKmz = lowercaseName.endsWith('.kmz');
+    final isKml = lowercaseName.endsWith('.kml');
+    if (!isKmz && !isKml) {
+      throw const FormatException('Vui lòng chọn file .kmz hoặc .kml');
+    }
 
-    final file = File(filePath);
-    final lowercasePath = file.path.toLowerCase();
+    List<int>? bytes = picked.bytes;
+    if (bytes == null && picked.path != null) {
+      bytes = await File(picked.path!).readAsBytes();
+    }
+    if (bytes == null || bytes.isEmpty) {
+      throw const FormatException('Không đọc được nội dung file đã chọn.');
+    }
 
     String kmlContent = '';
 
     /// Nếu là KMZ → giải nén
-    if (lowercasePath.endsWith('.kmz')) {
-      final bytes = await file.readAsBytes();
+    if (isKmz) {
       final archive = ZipDecoder().decodeBytes(bytes);
 
       for (final archiveFile in archive) {
@@ -57,10 +65,9 @@ class KmzService {
         }
       }
     }
-
     /// Nếu là KML
     else {
-      kmlContent = await file.readAsString();
+      kmlContent = utf8.decode(bytes, allowMalformed: true);
     }
 
     if (kmlContent.trim().isEmpty) {
