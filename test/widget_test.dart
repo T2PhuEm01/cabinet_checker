@@ -12,6 +12,6 @@ import 'package:cabinet_checker/main.dart';
 void main() {
   testWidgets('App renders main title', (WidgetTester tester) async {
     await tester.pumpWidget(const MyApp());
-    expect(find.text('Cabinet Checker'), findsOneWidget);
+    expect(find.text('CabCheck'), findsOneWidget);
   });
 }

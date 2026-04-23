@@ -123,7 +123,7 @@ class HomeDatasetManager {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16),
                 child: Text(
-                  'Backup được lưu trong Downloads/cabinet_checker/backups. '
+                  'Khi sao lưu, bạn sẽ được chọn vị trí lưu file backup (.json). '
                   'Khôi phục nên chọn file có tên cabinet_workspace_backup_*.json.',
                   style: TextStyle(fontSize: 12),
                 ),

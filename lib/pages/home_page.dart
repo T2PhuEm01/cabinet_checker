@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cabinet_checker/controllers/home_controller.dart';
 import 'package:cabinet_checker/models/cabinet_dataset.dart';
 import 'package:cabinet_checker/models/cabinet_record.dart';
+import 'package:cabinet_checker/utils/constants.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:cabinet_checker/services/location_service.dart';
 import 'package:cabinet_checker/utils/button_util.dart';
@@ -19,12 +21,14 @@ import 'package:cabinet_checker/widgets/cabinet_table.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_background/flutter_background.dart';
+import 'package:flutter_svg/svg.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 
 import '../services/export_cancel_token.dart';
 import '../services/download_path_service.dart';
 import '../services/google_sheets_sync_service.dart';
+import '../services/ios_background_task_service.dart';
 import '../services/storage_service.dart';
 import 'cabinet_detail_page.dart';
 import 'export/export_options_dialog.dart';
@@ -45,6 +49,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final GoogleSheetsSyncService _googleSheetsSyncService =
       GoogleSheetsSyncService();
   final DownloadPathService _downloadPathService = DownloadPathService();
+  final IosBackgroundTaskService _iosBackgroundTaskService =
+      IosBackgroundTaskService();
   final StorageService _storageService = StorageService();
 
   static const List<String> _statusFilterLabels = <String>[
@@ -216,12 +222,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<bool> _enableBackgroundExecutionForExport() async {
+    if (Platform.isIOS) {
+      return _iosBackgroundTaskService.beginExportTask();
+    }
     if (!Platform.isAndroid) return false;
 
     try {
       final initialized = await FlutterBackground.initialize(
         androidConfig: const FlutterBackgroundAndroidConfig(
-          notificationTitle: 'Cabinet Checker',
+          notificationTitle: 'CabCheck',
           notificationText: 'Đang đồng bộ Google Sheets...',
           notificationImportance: AndroidNotificationImportance.normal,
           enableWifiLock: true,
@@ -237,6 +246,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _disableBackgroundExecutionForExport() async {
+    if (Platform.isIOS) {
+      await _iosBackgroundTaskService.endExportTask();
+      return;
+    }
     if (!Platform.isAndroid) return;
 
     try {
@@ -262,13 +275,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return _writeBackupFileWithFallback(fileName, workspace);
   }
 
-  Future<File> _writeManualBackupFile(CabinetWorkspaceState workspace) async {
+  Future<String?> _writeManualBackupFile(
+    CabinetWorkspaceState workspace,
+  ) async {
     final now = DateTime.now();
     String two(int value) => value.toString().padLeft(2, '0');
     final stamp =
         '${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}';
     final fileName = 'cabinet_workspace_backup_$stamp.json';
-    return _writeBackupFileWithFallback(fileName, workspace);
+    final data = jsonEncode(workspace.toMap());
+    final selectedPath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Chọn vị trí lưu backup',
+      fileName: fileName,
+      type: FileType.custom,
+      allowedExtensions: <String>['json'],
+      bytes: Uint8List.fromList(utf8.encode(data)),
+    );
+
+    if (selectedPath == null) {
+      return null;
+    }
+
+    final selectedFile = File(selectedPath);
+    if (!await selectedFile.exists()) {
+      await selectedFile.writeAsString(data, flush: true);
+    }
+
+    return selectedPath;
   }
 
   Future<File> _writeBackupFileWithFallback(
@@ -703,6 +736,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showStatusMessage(
         'Không bật được chế độ chạy nền, export sẽ chạy bình thường khi app còn mở.',
       );
+    } else if (Platform.isIOS) {
+      _showStatusMessage(
+        'Đã bật chạy nền trên iOS cho phiên xuất hiện tại (thời gian giới hạn bởi hệ thống).',
+      );
     }
 
     setState(() {
@@ -941,8 +978,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final workspace = _buildWorkspaceState();
         await _storageService.saveWorkspace(workspace);
         await _writeAutoBackupFile(workspace);
-        final backupFile = await _writeManualBackupFile(workspace);
-        final backupName = backupFile.path.split(Platform.pathSeparator).last;
+        final backupPath = await _writeManualBackupFile(workspace);
+        if (backupPath == null) {
+          _showStatusMessage('Đã hủy chọn vị trí sao lưu.');
+          return;
+        }
+        final backupName = backupPath.split(Platform.pathSeparator).last;
         _showStatusMessage('Đã sao lưu: $backupName');
       },
       onRestore: _restoreWorkspaceFromBackup,
@@ -968,10 +1009,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Row(
                     children: [
-                      Icon(
-                        Icons.dns,
-                        color: colorViettel,
-                        size: Dimens.iconSizeMid + 4,
+                      SvgPicture.asset(
+                        AssetConstants.icLogo,
+                        width: 30,
+                        height: 30,
                       ),
                       const Spacer(),
                       buttonOnlyIcon(
