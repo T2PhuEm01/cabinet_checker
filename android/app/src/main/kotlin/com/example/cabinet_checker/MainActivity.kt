@@ -32,6 +32,7 @@ class MainActivity : FlutterActivity() {
         private const val EXPORT_NOTIFICATION_CHANNEL = "cabinet_checker/export_notification"
         private const val REQUEST_CAMERA_CHOOSER = 1001
         private const val REQUEST_CAMERA_PERMISSION = 1002
+        private const val REQUEST_NOTIFICATION_PERMISSION = 1003
         private const val TAG = "CabinetCameraChooser"
         private const val EXPORT_NOTIFICATION_CHANNEL_ID = "cabcheck_export_channel"
         private const val EXPORT_NOTIFICATION_ID = 3101
@@ -41,9 +42,13 @@ class MainActivity : FlutterActivity() {
     private var pendingCaptureAfterPermission: MethodChannel.Result? = null
     private var photoUri: Uri? = null
     private var photoPath: String? = null
+    private var notificationPermissionRequested = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // Request notification permission early for Android 13+
+        requestNotificationPermissionIfNeeded()
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -169,6 +174,26 @@ class MainActivity : FlutterActivity() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (notificationPermissionRequested) return
+
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!granted) {
+            notificationPermissionRequested = true
+            Log.i(TAG, "requesting POST_NOTIFICATIONS permission")
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION
+            )
+        }
+    }
+
     private fun openCameraWithChooser(result: MethodChannel.Result) {
         Log.i(TAG, "captureWithChooser called")
         // Tạo file ảnh tạm thời
@@ -243,23 +268,34 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CAMERA_PERMISSION) {
-            val result = pendingCaptureAfterPermission
-            pendingCaptureAfterPermission = null
-            if (result == null) return
+        when (requestCode) {
+            REQUEST_CAMERA_PERMISSION -> {
+                val result = pendingCaptureAfterPermission
+                pendingCaptureAfterPermission = null
+                if (result == null) return
 
-            val granted = grantResults.isNotEmpty() &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
-            if (granted) {
-                Log.i(TAG, "camera permission granted, retry opening camera")
-                openCameraWithChooser(result)
-            } else {
-                Log.e(TAG, "camera permission denied by user")
-                result.error(
-                    "CAMERA_PERMISSION_DENIED",
-                    "Ứng dụng chưa được cấp quyền camera.",
-                    null
-                )
+                val granted = grantResults.isNotEmpty() &&
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    Log.i(TAG, "camera permission granted, retry opening camera")
+                    openCameraWithChooser(result)
+                } else {
+                    Log.e(TAG, "camera permission denied by user")
+                    result.error(
+                        "CAMERA_PERMISSION_DENIED",
+                        "Ứng dụng chưa được cấp quyền camera.",
+                        null
+                    )
+                }
+            }
+            REQUEST_NOTIFICATION_PERMISSION -> {
+                val granted = grantResults.isNotEmpty() &&
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    Log.i(TAG, "POST_NOTIFICATIONS permission granted")
+                } else {
+                    Log.w(TAG, "POST_NOTIFICATIONS permission denied by user, notifications will be silent")
+                }
             }
         }
     }

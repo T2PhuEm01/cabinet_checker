@@ -79,6 +79,7 @@ class HomeDatasetManager {
     required String? selectedDatasetId,
     required void Function(String datasetId) onSelect,
     required Future<void> Function(String datasetId) onDelete,
+    required Future<void> Function() onCreate,
     required Future<void> Function() onBackup,
     required Future<void> Function() onRestore,
   }) {
@@ -95,6 +96,17 @@ class HomeDatasetManager {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Row(
                   children: [
+                    Expanded(
+                      child: FilledButton.tonalIcon(
+                        onPressed: () async {
+                          Navigator.of(context).pop();
+                          await onCreate();
+                        },
+                        icon: const Icon(Icons.create_new_folder_outlined),
+                        label: const Text('Tạo file mới'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: FilledButton.tonalIcon(
                         onPressed: () async {

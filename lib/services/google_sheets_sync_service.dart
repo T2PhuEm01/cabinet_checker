@@ -54,8 +54,6 @@ class GoogleSheetsSyncService {
       cancelToken?.throwIfCanceled();
       final record = records[i];
       final photosPayload = <Map<String, dynamic>>[];
-      final photoNames = <String>[];
-      final photoLocalPaths = <String>[];
 
       for (
         var photoIndex = 0;
@@ -78,16 +76,10 @@ class GoogleSheetsSyncService {
           photoIndex: photoIndex,
           photoCount: record.photos.length,
         );
-        photoNames.add(fileName);
-        photoLocalPaths.add(photo.path);
         photosPayload.add(<String, dynamic>{
           'name': fileName,
           'mimeType': _guessMimeType(fileName),
           'base64': base64Encode(bytes),
-          // Backward-compatible aliases for older Apps Script payload parsers.
-          'data': base64Encode(bytes),
-          'content': base64Encode(bytes),
-          'path': photo.path,
           'capturedAt': photo.capturedAt.toIso8601String(),
           'latitude': photo.latitude,
           'longitude': photo.longitude,
@@ -113,6 +105,14 @@ class GoogleSheetsSyncService {
           'wrongPosition': record.wrongPosition ? 'Có' : 'Không',
           'hangingCable': record.hangingCable ? 'Có' : 'Không',
           'unfixedCable': record.unfixedCable ? 'Có' : 'Không',
+          'shellPassed': record.shellPassed ? 'Đạt' : 'Không đạt',
+          'hasLabel': record.hasLabel ? 'Có' : 'Không',
+          'saggingPassed': record.saggingPassed ? 'Đạt' : 'Không đạt',
+          'cleanedPassed': record.cleanedPassed ? 'Đạt' : 'Không đạt',
+          'subscriberCableNotSagging': record.subscriberCableNotSagging
+              ? 'Có'
+              : 'Không',
+          'needsProcessing': record.needsProcessing ? 'Có' : 'Không',
           'otherIssue': record.otherIssue,
           'otherIssueType': record.otherIssueType,
           'isPassed': record.isPassed ? 'Đạt' : 'Không đạt',
@@ -120,21 +120,13 @@ class GoogleSheetsSyncService {
           'notes': record.notes,
           'inspectorName': record.inspectorName,
           'lastCheckedAt': record.lastCheckedAt?.toIso8601String(),
-          // Compatibility fields some scripts use to render photo columns.
-          'photoCount': record.photos.length,
-          'photoNames': photoNames,
-          'photoLocalPaths': photoLocalPaths,
         },
-        'photoCount': record.photos.length,
-        'photoNames': photoNames,
-        'photoLocalPaths': photoLocalPaths,
         'photos': photosPayload,
       };
 
       await _uploadRecordWithRetry(
         uri: uri,
         body: body,
-        expectedPhotoCount: photosPayload.length,
         cancelToken: cancelToken,
         onRetry: (attempt, maxAttempts) {
           onProgress?.call(
@@ -168,10 +160,174 @@ class GoogleSheetsSyncService {
     return successCount;
   }
 
+  /// Export photos to Google Drive organized by issue category
+  /// Creates folder structure: {date}/{issue_category}/{cabinet_code}_{photo_index}.{ext}
+  Future<void> exportPhotosByIssueToDrive({
+    required String appsScriptUrl,
+    required List<CabinetRecord> records,
+    GoogleSheetsSyncProgressCallback? onProgress,
+    ExportCancelToken? cancelToken,
+  }) async {
+    cancelToken?.throwIfCanceled();
+    final uri = Uri.parse(appsScriptUrl.trim());
+    _validateAppsScriptUri(uri);
+
+    if (records.isEmpty) return;
+
+    onProgress?.call(
+      const GoogleSheetsSyncProgress(
+        value: 0.02,
+        message: 'Đang kết nối Google Drive...',
+      ),
+    );
+
+    // Issue category definitions
+    final issueCategories = <String, bool Function(CabinetRecord)>{
+      'Vỏ tủ không đạt': (r) => !r.shellPassed,
+      'Nhãn không đạt': (r) => !r.hasLabel,
+      'Cáp nhập tủ không đạt': (r) =>
+          r.unfixedCable || !r.subscriberCableNotSagging,
+      'Tủ sai vị trí': (r) => r.wrongPosition,
+      'Lắp đặt không chắc chắn/Nguy cơ rơi đổ (TLĐKCC/NCRĐ)': (r) =>
+          r.hangingCable,
+    };
+
+    // Group records by issue category
+    final recordsByCategory = <String, List<CabinetRecord>>{};
+    for (final category in issueCategories.keys) {
+      recordsByCategory[category] = <CabinetRecord>[];
+    }
+
+    for (final record in records) {
+      cancelToken?.throwIfCanceled();
+      for (final entry in issueCategories.entries) {
+        if (entry.value(record) && record.photos.isNotEmpty) {
+          recordsByCategory[entry.key]!.add(record);
+        }
+      }
+    }
+
+    // Count total photos and prepare category data
+    var totalPhotos = 0;
+    final categoryPhotoData = <String, dynamic>{};
+
+    for (final entry in recordsByCategory.entries) {
+      final categoryName = entry.key;
+      final recordsInCategory = entry.value;
+
+      if (recordsInCategory.isEmpty) continue;
+
+      final photosList = <Map<String, dynamic>>[];
+
+      for (final record in recordsInCategory) {
+        cancelToken?.throwIfCanceled();
+
+        for (
+          var photoIndex = 0;
+          photoIndex < record.photos.length;
+          photoIndex++
+        ) {
+          cancelToken?.throwIfCanceled();
+          final photo = record.photos[photoIndex];
+          final file = File(photo.path);
+
+          if (!file.existsSync()) continue;
+
+          late final List<int> bytes;
+          try {
+            bytes = await _awaitCancellable(file.readAsBytes(), cancelToken);
+          } on FileSystemException {
+            continue;
+          }
+
+          final fileName = _buildPhotoFileName(
+            cabinetCode: record.id,
+            sourcePath: file.path,
+            photoIndex: photoIndex,
+            photoCount: record.photos.length,
+          );
+
+          photosList.add(<String, dynamic>{
+            'name': fileName,
+            'mimeType': _guessMimeType(fileName),
+            'base64': base64Encode(bytes),
+            'cabinetCode': record.id,
+            'cabinetName': record.name,
+          });
+
+          totalPhotos++;
+          final progressValue =
+              0.05 +
+              ((totalPhotos /
+                      records.fold<int>(0, (sum, r) => sum + r.photos.length)) *
+                  0.25);
+
+          onProgress?.call(
+            GoogleSheetsSyncProgress(
+              value: progressValue.clamp(0.05, 0.30),
+              message: 'Đang chuẩn bị ảnh: $categoryName ($totalPhotos)',
+            ),
+          );
+        }
+      }
+
+      if (photosList.isNotEmpty) {
+        categoryPhotoData[categoryName] = photosList;
+      }
+    }
+
+    if (categoryPhotoData.isEmpty) {
+      onProgress?.call(
+        const GoogleSheetsSyncProgress(
+          value: 1.0,
+          message: 'Không có ảnh cần xuất.',
+        ),
+      );
+      return;
+    }
+
+    // Send all organized photos in one batch to Google Apps Script
+    onProgress?.call(
+      GoogleSheetsSyncProgress(
+        value: 0.35,
+        message:
+            'Đang tải ${categoryPhotoData.length} danh mục lên Google Drive...',
+      ),
+    );
+
+    final body = <String, dynamic>{
+      'action': 'exportPhotosByIssueCategory',
+      'exportDate': DateTime.now().toString().split(
+        ' ',
+      )[0], // YYYY-MM-DD format
+      'categoryPhotoData': categoryPhotoData,
+    };
+
+    await _uploadRecordWithRetry(
+      uri: uri,
+      body: body,
+      cancelToken: cancelToken,
+      onRetry: (attempt, maxAttempts) {
+        onProgress?.call(
+          GoogleSheetsSyncProgress(
+            value: 0.35 + ((attempt / maxAttempts) * 0.5),
+            message: 'Lỗi tạm thời, thử lại... (lần $attempt/$maxAttempts)',
+          ),
+        );
+      },
+    );
+
+    onProgress?.call(
+      const GoogleSheetsSyncProgress(
+        value: 1.0,
+        message: 'Hoàn tất xuất ảnh theo danh mục lên Google Drive!',
+      ),
+    );
+  }
+
   Future<void> _uploadRecordWithRetry({
     required Uri uri,
     required Map<String, dynamic> body,
-    required int expectedPhotoCount,
     ExportCancelToken? cancelToken,
     void Function(int attempt, int maxAttempts)? onRetry,
   }) async {
@@ -185,11 +341,6 @@ class GoogleSheetsSyncService {
         ).timeout(_singleRecordTimeout);
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
-          _validateSuccessfulBody(
-            uri: uri,
-            body: response.body,
-            expectedPhotoCount: expectedPhotoCount,
-          );
           return;
         }
 
@@ -311,49 +462,6 @@ class GoogleSheetsSyncService {
       future,
       token.whenCanceled.then<T>((_) => throw const ExportCanceledException()),
     ]);
-  }
-
-  void _validateSuccessfulBody({
-    required Uri uri,
-    required String body,
-    required int expectedPhotoCount,
-  }) {
-    if (body.trim().isEmpty) return;
-    Map<String, dynamic>? decoded;
-    try {
-      final raw = jsonDecode(body);
-      if (raw is Map<String, dynamic>) {
-        decoded = raw;
-      } else if (raw is Map) {
-        decoded = Map<String, dynamic>.from(raw);
-      }
-    } catch (_) {
-      return;
-    }
-    if (decoded == null) return;
-
-    final ok = decoded['ok'];
-    if (ok == false) {
-      final error = (decoded['error'] ?? 'Unknown Apps Script error')
-          .toString();
-      throw HttpException('Google Apps Script báo lỗi: $error');
-    }
-
-    if (expectedPhotoCount <= 0) return;
-    final photosUploaded = _asInt(decoded['photosUploaded']);
-    if (photosUploaded != null && photosUploaded == 0) {
-      throw HttpException(
-        'Không tạo được link ảnh trên Google Drive dù bản ghi có ảnh. '
-        'Hãy kiểm tra quyền Drive trong Apps Script và dùng bản script mới nhất. URL hiện tại: $uri',
-      );
-    }
-  }
-
-  int? _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value);
-    return null;
   }
 
   String _buildPhotoFileName({

@@ -27,6 +27,7 @@ import 'package:get/get.dart';
 
 import '../services/export_cancel_token.dart';
 import '../services/download_path_service.dart';
+import '../services/google_drive_service.dart';
 import '../services/google_sheets_sync_service.dart';
 import '../services/ios_background_task_service.dart';
 import '../services/export_notification_service.dart';
@@ -49,6 +50,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final HomeController _controller = Get.put(HomeController());
   final GoogleSheetsSyncService _googleSheetsSyncService =
       GoogleSheetsSyncService();
+  final GoogleDriveService _googleDriveService = GoogleDriveService();
   final DownloadPathService _downloadPathService = DownloadPathService();
   final IosBackgroundTaskService _iosBackgroundTaskService =
       IosBackgroundTaskService();
@@ -272,6 +274,87 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       selectedDatasetId: _selectedDatasetId,
       googleAppsScriptUrl: _googleAppsScriptUrl,
     );
+  }
+
+  String _defaultDatasetName() {
+    final now = DateTime.now();
+    String twoDigits(int value) => value.toString().padLeft(2, '0');
+    return 'File mới ${now.year}${twoDigits(now.month)}${twoDigits(now.day)}_${twoDigits(now.hour)}${twoDigits(now.minute)}';
+  }
+
+  Future<void> _createNewDataset() async {
+    final nameController = TextEditingController(text: _defaultDatasetName());
+
+    final fileName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Tạo file mới'),
+          content: TextField(
+            controller: nameController,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Tên file',
+              hintText: 'VD: Tuyến QL1A - Tháng 5',
+            ),
+            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(nameController.text),
+              child: const Text('Tạo'),
+            ),
+          ],
+        );
+      },
+    );
+
+    nameController.dispose();
+
+    final normalizedName = fileName?.trim() ?? '';
+    if (normalizedName.isEmpty) {
+      _showStatusMessage('Tên file mới không được để trống.');
+      return;
+    }
+
+    final dataset = CabinetDataset(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      fileName: normalizedName,
+      importedAt: DateTime.now(),
+      records: <CabinetRecord>[],
+    );
+
+    setState(() {
+      _datasets.add(dataset);
+      _selectedDatasetId = dataset.id;
+      _records.clear();
+    });
+
+    await _persistWorkspace();
+    _showStatusMessage('Đã tạo file mới: $normalizedName');
+  }
+
+  Future<void> _applyCreatedRecord(CabinetRecord created) async {
+    final datasetIndex = _datasets.indexWhere(
+      (dataset) => dataset.id == _selectedDatasetId,
+    );
+    if (datasetIndex < 0) {
+      _showStatusMessage('Hãy chọn hoặc tạo file trước khi thêm tủ mới.');
+      return;
+    }
+
+    setState(() {
+      _records.add(created);
+      _datasets[datasetIndex].records.add(created);
+    });
+
+    await _persistWorkspace();
+    _showStatusMessage('Đã thêm tủ mới: ${created.id}');
   }
 
   Future<File> _writeAutoBackupFile(CabinetWorkspaceState workspace) async {
@@ -558,6 +641,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       () => CabinetDetailPage(
         record: record,
         defaultInspectorName: _getDefaultInspectorName(),
+        onRecordDeleted: _deleteRecordById,
       ),
     );
 
@@ -586,6 +670,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _persistWorkspace();
 
     _showStatusMessage('Đã cập nhật tủ: ${updated.id}');
+  }
+
+  Future<void> _deleteRecordById(String recordId) async {
+    final recordIndex = _records.indexWhere((item) => item.id == recordId);
+    if (recordIndex < 0) {
+      _showStatusMessage('Không tìm thấy tủ để xóa.');
+      return;
+    }
+
+    setState(() {
+      _records.removeAt(recordIndex);
+
+      final datasetIndex = _datasets.indexWhere(
+        (dataset) => dataset.id == _selectedDatasetId,
+      );
+      if (datasetIndex >= 0) {
+        _datasets[datasetIndex].records.removeWhere(
+          (item) => item.id == recordId,
+        );
+      }
+    });
+
+    await _persistWorkspace();
+    _showStatusMessage('Đã xóa tủ: $recordId');
   }
 
   Future<void> _applyUpdatedRecord(CabinetRecord updated) async {
@@ -620,6 +728,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         defaultInspectorName: _getDefaultInspectorName(),
         markerIconType: _locationIconType,
         onRecordUpdated: _applyUpdatedRecord,
+        onRecordCreated: _applyCreatedRecord,
+        onRecordDeleted: _deleteRecordById,
       ),
     );
   }
@@ -683,7 +793,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
 
       final checkedAt = record.lastCheckedAt;
-      if (checkedAt == null) return false;
+      if (checkedAt == null) {
+        return options.statusFilter == ExportRecordStatusFilter.all;
+      }
       final checkedAtLocal = checkedAt.toLocal();
 
       if (fromBoundary != null && checkedAtLocal.isBefore(fromBoundary)) {
@@ -1009,6 +1121,159 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _exportPhotosByIssue() async {
+    if (_records.isEmpty) {
+      _showStatusMessage('Không có dữ liệu kiểm tra để xuất.');
+      return;
+    }
+
+    // Always prompt for date selection when export is triggered
+    await _pickCheckedDateFilter();
+    if (_checkedDateFilter == null) {
+      _showStatusMessage('Vui lòng chọn ngày kiểm để xuất các tủ đã kiểm.');
+      return;
+    }
+
+    // Count records with issues AND that were checked on selected date
+    final recordsWithIssues = _records.where((r) {
+      final hasIssue =
+          !r.shellPassed ||
+          !r.hasLabel ||
+          r.unfixedCable ||
+          !r.subscriberCableNotSagging ||
+          r.wrongPosition ||
+          r.hangingCable;
+      if (!hasIssue) return false;
+      final checkedAt = r.lastCheckedAt;
+      if (checkedAt == null) return false;
+
+      // Convert UTC to local time before comparing dates
+      final checkedAtLocal = checkedAt.toLocal();
+      return checkedAtLocal.year == _checkedDateFilter!.year &&
+          checkedAtLocal.month == _checkedDateFilter!.month &&
+          checkedAtLocal.day == _checkedDateFilter!.day;
+    }).toList();
+
+    if (recordsWithIssues.isEmpty) {
+      _showStatusMessage('Không có bản ghi nào có vấn đề cần xuất.');
+      return;
+    }
+
+    // Check if already signed in
+    if (!_googleDriveService.isSignedIn) {
+      // Try to sign in silently first
+      try {
+        final signedIn = await _googleDriveService.signIn();
+        if (!signedIn) {
+          _showStatusMessage('Đăng nhập Google thất bại. Vui lòng thử lại.');
+          return;
+        }
+      } catch (e) {
+        _showStatusMessage('Lỗi đăng nhập Google: ${e.toString()}');
+        return;
+      }
+    }
+
+    setState(() {
+      _isBusy = true;
+    });
+
+    late ValueNotifier<double> progress;
+    late ValueNotifier<String> progressLabel;
+    late ExportCancelToken cancelToken;
+
+    try {
+      progress = ValueNotifier<double>(0.0);
+      progressLabel = ValueNotifier<String>('Chuẩn bị xuất...');
+      cancelToken = ExportCancelToken();
+
+      _activeExportCancelToken = cancelToken;
+
+      if (mounted) {
+        unawaited(
+          showDialog<void>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) {
+              return ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, progressValue, __) {
+                  return AlertDialog(
+                    title: const Text('Đang xuất ảnh lên Google Drive'),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        LinearProgressIndicator(
+                          value: progressValue,
+                          minHeight: 8,
+                        ),
+                        const SizedBox(height: 16),
+                        ValueListenableBuilder<String>(
+                          valueListenable: progressLabel,
+                          builder: (_, label, __) {
+                            return Text(
+                              label,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () {
+                          cancelToken.cancel();
+                          Navigator.of(context).pop();
+                        },
+                        child: const Text('Hủy'),
+                      ),
+                    ],
+                  );
+                },
+              );
+            },
+          ),
+        );
+      }
+
+      await _googleDriveService.exportPhotosByIssueToGoogleDrive(
+        records: recordsWithIssues,
+        checkedDate: _checkedDateFilter,
+        onProgress: (driveProgress) {
+          progress.value = driveProgress.value;
+          progressLabel.value = driveProgress.message;
+        },
+        cancelToken: cancelToken,
+      );
+
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+
+      _showStatusMessage(
+        'Xuất thành công!\nTất cả ảnh đã được tải lên Google Drive theo danh mục lỗi.',
+      );
+    } catch (e) {
+      debugPrint('Export by issue error: $e');
+      _showStatusMessage('Lỗi xuất: ${e.toString()}');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
+          _activeExportCancelToken = null;
+        });
+      } else {
+        _isBusy = false;
+        _activeExportCancelToken = null;
+      }
+      try {
+        progress.dispose();
+        progressLabel.dispose();
+      } catch (_) {}
+    }
+  }
+
   Future<void> _selectDataset(String datasetId) async {
     final result = HomeDatasetManager.selectDataset(
       datasets: _datasets,
@@ -1056,6 +1321,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       selectedDatasetId: _selectedDatasetId,
       onSelect: _selectDataset,
       onDelete: _deleteDataset,
+      onCreate: _createNewDataset,
       onBackup: () async {
         final workspace = _buildWorkspaceState();
         await _storageService.saveWorkspace(workspace);
@@ -1124,6 +1390,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       buttonOnlyIcon(
                         onPress: _isBusy ? null : _exportReports,
                         iconData: Icons.file_download,
+                        iconColor: colorViettel,
+                        size: Dimens.iconSizeMid,
+                        visualDensity: minimumVisualDensity,
+                      ),
+                      hSpacer10(),
+                      buttonOnlyIcon(
+                        onPress: _isBusy ? null : _exportPhotosByIssue,
+                        iconData: Icons.collections,
                         iconColor: colorViettel,
                         size: Dimens.iconSizeMid,
                         visualDensity: minimumVisualDensity,

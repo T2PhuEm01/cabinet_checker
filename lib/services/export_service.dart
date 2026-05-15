@@ -493,3 +493,152 @@ Map<String, Object>? _createPhotoCollageWorker(
     'height': canvasHeight,
   };
 }
+
+/// Exports photos organized by issue category into folder structure.
+/// Creates a folder with today's date, containing subfolders for each issue type.
+Future<String> exportPhotosByIssueCategory(
+  List<CabinetRecord> records,
+  ExportLocationType locationType,
+  DownloadPathService downloadPathService, {
+  String? customPath,
+  ExportProgressCallback? onProgress,
+  ExportCancelToken? cancelToken,
+}) async {
+  cancelToken?.throwIfCanceled();
+  onProgress?.call(
+    const ExportProgress(value: 0.02, message: 'Đang chuẩn bị thư mục xuất...'),
+  );
+
+  // Create base export directory with today's date
+  final now = DateTime.now();
+  final dateFolder = DateFormat('dd/MM/yyyy').format(now);
+
+  final baseDir = await downloadPathService.getCabinetSubDirectory(
+    'exports_by_issue',
+    locationType: locationType,
+    customPath: customPath,
+  );
+
+  final exportRootDir = Directory('${baseDir.path}/$dateFolder');
+  if (!exportRootDir.existsSync()) {
+    exportRootDir.createSync(recursive: true);
+  }
+
+  // Define issue categories and their folder names
+  final issueCategories = <String, bool Function(CabinetRecord)>{
+    'Vỏ tủ không đạt': (r) => !r.shellPassed,
+    'Nhãn không đạt': (r) => !r.hasLabel,
+    'Cáp nhập tủ không đạt': (r) =>
+        r.unfixedCable || !r.subscriberCableNotSagging,
+    'Tủ sai vị trí': (r) => r.wrongPosition,
+    'Lắp đặt không chắc chắn/Nguy cơ rơi đổ (TLĐKCC/NCRĐ)': (r) =>
+        r.hangingCable,
+  };
+
+  // Map records to their issue categories
+  final recordsByCategory = <String, List<CabinetRecord>>{};
+  for (final category in issueCategories.keys) {
+    recordsByCategory[category] = <CabinetRecord>[];
+  }
+
+  for (final record in records) {
+    cancelToken?.throwIfCanceled();
+    for (final entry in issueCategories.entries) {
+      if (entry.value(record)) {
+        recordsByCategory[entry.key]!.add(record);
+      }
+    }
+  }
+
+  // Copy photos for each category (only if there are photos)
+  var totalPhotosCopied = 0;
+  var categoriesProcessed = 0;
+
+  for (final entry in recordsByCategory.entries) {
+    cancelToken?.throwIfCanceled();
+    final categoryName = entry.key;
+    final recordsInCategory = entry.value;
+
+    // Skip if no records in this category
+    if (recordsInCategory.isEmpty) {
+      categoriesProcessed++;
+      continue;
+    }
+
+    // Count total photos for this category
+    var totalPhotosInCategory = 0;
+    for (final record in recordsInCategory) {
+      totalPhotosInCategory += record.photos.length;
+    }
+
+    // Skip if no photos
+    if (totalPhotosInCategory == 0) {
+      categoriesProcessed++;
+      continue;
+    }
+
+    // Create category folder
+    final categoryDir = Directory('${exportRootDir.path}/$categoryName');
+    if (!categoryDir.existsSync()) {
+      categoryDir.createSync(recursive: true);
+    }
+
+    // Copy photos for each record in this category
+    var copiedInCategory = 0;
+    for (final record in recordsInCategory) {
+      cancelToken?.throwIfCanceled();
+
+      for (
+        var photoIndex = 0;
+        photoIndex < record.photos.length;
+        photoIndex++
+      ) {
+        cancelToken?.throwIfCanceled();
+        final photo = record.photos[photoIndex];
+        final sourceFile = File(photo.path);
+
+        if (sourceFile.existsSync()) {
+          try {
+            // Create filename: [cabinet_code]_[photo_index].ext
+            final sourceExtension = sourceFile.path.split('.').last;
+            final destFileName =
+                '${record.id}_${photoIndex + 1}.$sourceExtension';
+            final destPath = '${categoryDir.path}/$destFileName';
+
+            // Copy file
+            await sourceFile.copy(destPath);
+            copiedInCategory++;
+            totalPhotosCopied++;
+
+            final progressValue =
+                0.1 +
+                ((totalPhotosCopied /
+                        (records.fold<int>(
+                          0,
+                          (sum, r) => sum + r.photos.length,
+                        ))) *
+                    0.8);
+
+            onProgress?.call(
+              ExportProgress(
+                value: progressValue.clamp(0.1, 0.9),
+                message:
+                    'Đang copy ảnh: $categoryName\n($copiedInCategory/$totalPhotosInCategory)',
+              ),
+            );
+          } on FileSystemException catch (_) {
+            continue;
+          }
+        }
+      }
+    }
+
+    categoriesProcessed++;
+  }
+
+  onProgress?.call(
+    const ExportProgress(value: 0.95, message: 'Đang hoàn tất xuất dữ liệu...'),
+  );
+
+  return exportRootDir.path;
+}

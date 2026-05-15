@@ -5,6 +5,7 @@ import 'package:cabinet_checker/utils/colors.dart';
 import 'package:cabinet_checker/utils/common_utils.dart';
 import 'package:cabinet_checker/utils/dimens.dart';
 import 'package:cabinet_checker/utils/spacers.dart';
+import 'package:cabinet_checker/utils/text_field_util.dart';
 import 'package:cabinet_checker/utils/text_util.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
@@ -61,6 +62,8 @@ class MapPage extends StatefulWidget {
     required this.defaultInspectorName,
     required this.markerIconType,
     required this.onRecordUpdated,
+    required this.onRecordCreated,
+    required this.onRecordDeleted,
   });
 
   final List<CabinetRecord> records;
@@ -68,6 +71,8 @@ class MapPage extends StatefulWidget {
   final String defaultInspectorName;
   final LocationMarkerIconType markerIconType;
   final Future<void> Function(CabinetRecord updated) onRecordUpdated;
+  final Future<void> Function(CabinetRecord created) onRecordCreated;
+  final Future<void> Function(String recordId) onRecordDeleted;
 
   @override
   State<MapPage> createState() => _MapPageState();
@@ -199,11 +204,11 @@ class _MapPageState extends State<MapPage> {
   }
 
   List<CabinetRecord> get _filteredRecords {
-    final query = _codeFilterQuery.trim().toLowerCase();
+    final codes = _parseCodeFilters(_codeFilterQuery);
 
     return _records.where((record) {
       final codeMatch =
-          query.isEmpty || record.id.toLowerCase().contains(query);
+          codes.isEmpty || codes.any(record.id.toLowerCase().contains);
       if (!codeMatch) return false;
 
       if (_radiusFilterMeters == null) return true;
@@ -215,6 +220,14 @@ class _MapPageState extends State<MapPage> {
       );
       return meter <= _radiusFilterMeters!;
     }).toList();
+  }
+
+  List<String> _parseCodeFilters(String raw) {
+    return raw
+        .split(RegExp(r'[\n,;|]+'))
+        .map((value) => value.trim().toLowerCase())
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
   }
 
   Future<void> _openFilter() async {
@@ -272,19 +285,45 @@ class _MapPageState extends State<MapPage> {
                       },
                     ),
                     const SizedBox(height: 10),
-                    TextField(
+                    textFieldWithSuffixIcon(
                       controller: TextEditingController(text: tempCode)
                         ..selection = TextSelection.fromPosition(
                           TextPosition(offset: tempCode.length),
                         ),
-                      decoration: const InputDecoration(
-                        labelText: 'Lọc theo mã tủ (chứa chuỗi)',
-                        hintText: 'VD: TNH0024',
-                      ),
-                      onChanged: (value) {
+                      labelText: 'Lọc theo nhiều mã tủ',
+                      hint: 'VD: TNH0024, TNH0031, TNH0045',
+                      maxLines: 2,
+                      suffixIcon: tempCode.trim().isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Xóa bộ lọc mã',
+                              onPressed: () {
+                                setModalState(() {
+                                  tempCode = '';
+                                });
+                              },
+                              icon: const Icon(Icons.clear, size: 18),
+                            ),
+                      onTextChange: (value) {
                         tempCode = value;
+                        setModalState(() {});
                       },
                     ),
+                    if (_parseCodeFilters(tempCode).isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _parseCodeFilters(tempCode)
+                            .map(
+                              (code) => Chip(
+                                label: Text(code.toUpperCase()),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     if (tempRadius != null && _liveUserPos == null)
                       const Text(
@@ -362,6 +401,7 @@ class _MapPageState extends State<MapPage> {
         child: CabinetDetailPage(
           record: record.copyWith(),
           defaultInspectorName: widget.defaultInspectorName,
+          onRecordDeleted: _deleteRecord,
         ),
       ),
     );
@@ -379,6 +419,67 @@ class _MapPageState extends State<MapPage> {
         SnackBar(content: Text('Đã cập nhật tủ ${updated.name} từ bản đồ.')),
       );
     }
+  }
+
+  Future<void> _deleteRecord(String recordId) async {
+    final index = _records.indexWhere((item) => item.id == recordId);
+    if (index < 0) return;
+
+    setState(() {
+      _records.removeAt(index);
+    });
+
+    await widget.onRecordDeleted(recordId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Đã xóa tủ $recordId từ bản đồ.')));
+  }
+
+  Future<void> _openCreateRecordSheet(LatLng location) async {
+    final created = await showModalBottomSheet<CabinetRecord>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.95,
+        child: CabinetDetailPage(
+          record: CabinetRecord(
+            id: 'NEW_${DateTime.now().millisecondsSinceEpoch}',
+            name: 'Tủ mới',
+            latitudeRef: location.latitude,
+            longitudeRef: location.longitude,
+          ),
+          defaultInspectorName: widget.defaultInspectorName,
+          isNewRecord: true,
+          existingRecordIds: _records.map((item) => item.id).toSet(),
+          onRecordDeleted: _deleteRecord,
+        ),
+      ),
+    );
+
+    if (created == null) return;
+
+    setState(() {
+      _records.add(created);
+    });
+    await widget.onRecordCreated(created);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Đã thêm tủ mới ${created.id} từ bản đồ.')),
+    );
+  }
+
+  Future<void> _addCabinetFromCurrentLocation() async {
+    final location = _liveUserPos;
+    if (location != null) {
+      await _openCreateRecordSheet(
+        LatLng(location.latitude, location.longitude),
+      );
+      return;
+    }
+
+    await _openCreateRecordSheet(_mapController.camera.center);
   }
 
   Widget _buildUserDirectionMarker() {
@@ -422,6 +523,14 @@ class _MapPageState extends State<MapPage> {
         appBar: AppBar(
           title: TextRobotoAutoBold('Bản đồ', fontSize: 18),
           actions: [
+            buttonOnlyIcon(
+              onPress: _addCabinetFromCurrentLocation,
+              iconData: Icons.add_location_alt_outlined,
+              iconColor: colorViettel,
+              size: Dimens.iconSizeMid,
+              visualDensity: minimumVisualDensity,
+            ),
+            hSpacer10(),
             buttonOnlyIcon(
               iconColor: Colors.black,
               size: Dimens.iconSizeMid,
@@ -500,6 +609,9 @@ class _MapPageState extends State<MapPage> {
                   initialZoom: 17,
                   maxZoom: _maxInteractiveZoom,
                   minZoom: 3,
+                  onLongPress: (tapPosition, point) {
+                    unawaited(_openCreateRecordSheet(point));
+                  },
                   onPositionChanged: (camera, hasGesture) {
                     _currentZoom = camera.zoom;
                     _updateRecenterVisibility(camera.center);
@@ -586,6 +698,24 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ),
                 ),
+              SafeArea(
+                child: Align(
+                  alignment: Alignment.bottomLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 10, bottom: 10),
+                    child: FloatingActionButton.extended(
+                      heroTag: 'createCabinetOnMap',
+                      backgroundColor: colorViettel,
+                      onPressed: _addCabinetFromCurrentLocation,
+                      icon: const Icon(Icons.add, color: Colors.white),
+                      label: const Text(
+                        'Thêm tủ',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),

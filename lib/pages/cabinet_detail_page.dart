@@ -18,10 +18,16 @@ class CabinetDetailPage extends StatefulWidget {
     super.key,
     required this.record,
     this.defaultInspectorName = '',
+    this.isNewRecord = false,
+    this.existingRecordIds = const <String>{},
+    this.onRecordDeleted,
   });
 
   final CabinetRecord record;
   final String defaultInspectorName;
+  final bool isNewRecord;
+  final Set<String> existingRecordIds;
+  final Future<void> Function(String recordId)? onRecordDeleted;
 
   @override
   State<CabinetDetailPage> createState() => _CabinetDetailPageState();
@@ -30,6 +36,11 @@ class CabinetDetailPage extends StatefulWidget {
 class _CabinetDetailPageState extends State<CabinetDetailPage> {
   final CameraService _cameraService = CameraService();
   late CabinetRecord _record;
+  late final TextEditingController _idController;
+  late final TextEditingController _nameController;
+  late final TextEditingController _routeController;
+  late final TextEditingController _latitudeController;
+  late final TextEditingController _longitudeController;
   late final TextEditingController _notesController;
   late final TextEditingController _inspectorController;
   late final TextEditingController _otherIssueController;
@@ -40,6 +51,23 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
   void initState() {
     super.initState();
     _record = widget.record;
+    _idController = TextEditingController(text: _record.id);
+    _nameController = TextEditingController(text: _record.name);
+    _routeController = TextEditingController(text: _record.route);
+    _latitudeController = TextEditingController(
+      text: _record.latitudeRef.toString(),
+    );
+    _longitudeController = TextEditingController(
+      text: _record.longitudeRef.toString(),
+    );
+    // Default new/unchecked cabinets to checked values
+    if (_record.lastCheckedAt == null) {
+      _record.shellPassed = true;
+      _record.hasLabel = true;
+      _record.saggingPassed = true;
+      _record.cleanedPassed = true;
+      _record.needsProcessing = true;
+    }
     _notesController = TextEditingController(text: _record.notes);
     final inspectorText = _record.inspectorName.trim().isEmpty
         ? widget.defaultInspectorName
@@ -54,19 +82,101 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
 
   @override
   void dispose() {
+    _idController.dispose();
+    _nameController.dispose();
+    _routeController.dispose();
+    _latitudeController.dispose();
+    _longitudeController.dispose();
     _notesController.dispose();
     _inspectorController.dispose();
     _otherIssueController.dispose();
     super.dispose();
   }
 
+  double? _parseDouble(String raw) {
+    return double.tryParse(raw.trim().replaceAll(',', '.'));
+  }
+
+  void _showValidationError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _deleteAndPop() async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Xóa tủ'),
+          content: Text('Bạn có chắc muốn xóa tủ ${_record.id} không?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Xóa'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (shouldDelete != true) return;
+
+    if (widget.onRecordDeleted != null) {
+      await widget.onRecordDeleted!(_record.id);
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
   void _saveAndPop() {
-    _record.notes = _notesController.text.trim();
-    _record.inspectorName = _inspectorController.text.trim();
-    _record.otherIssueType = _otherIssueController.text.trim();
+    final id = _idController.text.trim();
+    final name = _nameController.text.trim();
+    final route = _routeController.text.trim();
+    final latitude = _parseDouble(_latitudeController.text);
+    final longitude = _parseDouble(_longitudeController.text);
+
+    if (widget.isNewRecord && id.isEmpty) {
+      _showValidationError('Vui lòng nhập mã tủ.');
+      return;
+    }
+    if (widget.isNewRecord && name.isEmpty) {
+      _showValidationError('Vui lòng nhập tên tủ.');
+      return;
+    }
+    if (widget.isNewRecord && latitude == null) {
+      _showValidationError('Vui lòng nhập latitude hợp lệ.');
+      return;
+    }
+    if (widget.isNewRecord && longitude == null) {
+      _showValidationError('Vui lòng nhập longitude hợp lệ.');
+      return;
+    }
+    if (widget.isNewRecord && widget.existingRecordIds.contains(id)) {
+      _showValidationError('Mã tủ đã tồn tại, hãy đổi mã khác.');
+      return;
+    }
+
+    final savedRecord = _record.copyWith(
+      id: id.isEmpty ? _record.id : id,
+      name: name.isEmpty ? _record.name : name,
+      route: route,
+      latitudeRef: latitude ?? _record.latitudeRef,
+      longitudeRef: longitude ?? _record.longitudeRef,
+    );
+
+    savedRecord.notes = _notesController.text.trim();
+    savedRecord.inspectorName = _inspectorController.text.trim();
+    savedRecord.otherIssueType = _otherIssueController.text.trim();
     final now = DateTime.now();
     if (_selectedCheckedDate != null) {
-      _record.lastCheckedAt = DateTime(
+      savedRecord.lastCheckedAt = DateTime(
         _selectedCheckedDate!.year,
         _selectedCheckedDate!.month,
         _selectedCheckedDate!.day,
@@ -74,10 +184,10 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
         now.minute,
         now.second,
       );
-    } else if (_record.lastCheckedAt == null) {
-      _record.lastCheckedAt = now;
+    } else if (savedRecord.lastCheckedAt == null) {
+      savedRecord.lastCheckedAt = now;
     }
-    Navigator.of(context).pop(_record);
+    Navigator.of(context).pop(savedRecord);
   }
 
   String _formatDateOnly(DateTime value) {
@@ -213,13 +323,22 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
     return KeyboardDismissOnTap(
       child: Scaffold(
         appBar: AppBar(
-          title: TextRobotoAutoBold(_record.name, fontSize: 18),
+          title: TextRobotoAutoBold(
+            widget.isNewRecord ? 'Tạo tủ mới' : _record.name,
+            fontSize: 18,
+          ),
           actions: [
             IconButton(
               tooltip: 'Copy mã tủ',
               onPressed: _copyCabinetId,
               icon: const Icon(Icons.copy),
             ),
+            if (!widget.isNewRecord)
+              IconButton(
+                tooltip: 'Xóa tủ',
+                onPressed: _deleteAndPop,
+                icon: const Icon(Icons.delete_outline),
+              ),
             TextButton(onPressed: _saveAndPop, child: const Text('Lưu')),
           ],
         ),
@@ -229,11 +348,61 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextRobotoAutoNormal('Mã tủ: ${_record.id}', fontSize: 14),
-                TextRobotoAutoNormal(
-                  'Tọa độ chuẩn: ${_record.latitudeRef}, ${_record.longitudeRef}',
-                  fontSize: 14,
-                ),
+                if (widget.isNewRecord) ...[
+                  TextRobotoAutoBold('Thông tin tủ mới', fontSize: 14),
+                  vSpacer5(),
+                  textFieldWithSuffixIcon(
+                    controller: _idController,
+                    labelText: 'Mã tủ',
+                    suffixIcon: _buildClearSuffix(_idController),
+                  ),
+                  vSpacer10(),
+                  textFieldWithSuffixIcon(
+                    controller: _nameController,
+                    labelText: 'Tên tủ',
+                    suffixIcon: _buildClearSuffix(_nameController),
+                  ),
+                  vSpacer10(),
+                  textFieldWithSuffixIcon(
+                    controller: _routeController,
+                    labelText: 'Tuyến / khu vực',
+                    suffixIcon: _buildClearSuffix(_routeController),
+                  ),
+                  vSpacer10(),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: textFieldWithSuffixIcon(
+                          controller: _latitudeController,
+                          type: const TextInputType.numberWithOptions(
+                            decimal: true,
+                            signed: true,
+                          ),
+                          labelText: 'Latitude',
+                          suffixIcon: _buildClearSuffix(_latitudeController),
+                        ),
+                      ),
+                      hSpacer10(),
+                      Expanded(
+                        child: textFieldWithSuffixIcon(
+                          controller: _longitudeController,
+                          type: const TextInputType.numberWithOptions(
+                            decimal: true,
+                            signed: true,
+                          ),
+                          labelText: 'Longitude',
+                          suffixIcon: _buildClearSuffix(_longitudeController),
+                        ),
+                      ),
+                    ],
+                  ),
+                ] else ...[
+                  TextRobotoAutoNormal('Mã tủ: ${_record.id}', fontSize: 14),
+                  TextRobotoAutoNormal(
+                    'Tọa độ chuẩn: ${_record.latitudeRef}, ${_record.longitudeRef}',
+                    fontSize: 14,
+                  ),
+                ],
                 vSpacer10(),
                 Row(
                   children: [
@@ -455,6 +624,49 @@ class _CabinetDetailPageState extends State<CabinetDetailPage> {
                   onChanged: (value) =>
                       setState(() => _record.unfixedCable = value ?? false),
                   title: const Text('Dây cáp chưa buộc cố định'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.shellPassed,
+                  onChanged: (value) =>
+                      setState(() => _record.shellPassed = value ?? true),
+                  title: const Text('Vỏ tủ (Đạt)'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.hasLabel,
+                  onChanged: (value) =>
+                      setState(() => _record.hasLabel = value ?? true),
+                  title: const Text('Tủ có nhãn (Đạt)'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.saggingPassed,
+                  onChanged: (value) =>
+                      setState(() => _record.saggingPassed = value ?? true),
+                  title: const Text('Độ võng (Đạt)'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.cleanedPassed,
+                  onChanged: (value) =>
+                      setState(() => _record.cleanedPassed = value ?? true),
+                  title: const Text('Tủ đã vệ sinh (Đạt)'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.subscriberCableNotSagging,
+                  onChanged: (value) => setState(
+                    () => _record.subscriberCableNotSagging = value ?? false,
+                  ),
+                  title: const Text('Cáp thuê bao không trùng võng'),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _record.needsProcessing,
+                  onChanged: (value) =>
+                      setState(() => _record.needsProcessing = value ?? true),
+                  title: const Text('Tủ cần xử lý'),
                 ),
                 textFieldWithSuffixIcon(
                   controller: _otherIssueController,

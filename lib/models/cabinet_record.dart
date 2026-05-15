@@ -89,6 +89,12 @@ class CabinetRecord {
     this.otherIssueType = '',
     this.isPassed = false,
     this.severity = SeverityLevel.none,
+    this.shellPassed = true,
+    this.hasLabel = true,
+    this.saggingPassed = true,
+    this.cleanedPassed = true,
+    this.subscriberCableNotSagging = false,
+    this.needsProcessing = true,
     this.notes = '',
     this.inspectorName = '',
     this.lastCheckedAt,
@@ -108,6 +114,12 @@ class CabinetRecord {
   bool wrongPosition;
   bool hangingCable;
   bool unfixedCable;
+  bool shellPassed;
+  bool hasLabel;
+  bool saggingPassed;
+  bool cleanedPassed;
+  bool subscriberCableNotSagging;
+  bool needsProcessing;
   bool otherIssue;
   String otherIssueType;
   bool isPassed;
@@ -135,6 +147,12 @@ class CabinetRecord {
     String? otherIssueType,
     bool? isPassed,
     SeverityLevel? severity,
+    bool? shellPassed,
+    bool? hasLabel,
+    bool? saggingPassed,
+    bool? cleanedPassed,
+    bool? subscriberCableNotSagging,
+    bool? needsProcessing,
     String? notes,
     String? inspectorName,
     DateTime? lastCheckedAt,
@@ -155,6 +173,13 @@ class CabinetRecord {
       wrongPosition: wrongPosition ?? this.wrongPosition,
       hangingCable: hangingCable ?? this.hangingCable,
       unfixedCable: unfixedCable ?? this.unfixedCable,
+      shellPassed: shellPassed ?? this.shellPassed,
+      hasLabel: hasLabel ?? this.hasLabel,
+      saggingPassed: saggingPassed ?? this.saggingPassed,
+      cleanedPassed: cleanedPassed ?? this.cleanedPassed,
+      subscriberCableNotSagging:
+          subscriberCableNotSagging ?? this.subscriberCableNotSagging,
+      needsProcessing: needsProcessing ?? this.needsProcessing,
       otherIssue: otherIssue ?? this.otherIssue,
       otherIssueType: otherIssueType ?? this.otherIssueType,
       isPassed: isPassed ?? this.isPassed,
@@ -181,6 +206,12 @@ class CabinetRecord {
       'wrongPosition': wrongPosition,
       'hangingCable': hangingCable,
       'unfixedCable': unfixedCable,
+      'shellPassed': shellPassed,
+      'hasLabel': hasLabel,
+      'saggingPassed': saggingPassed,
+      'cleanedPassed': cleanedPassed,
+      'subscriberCableNotSagging': subscriberCableNotSagging,
+      'needsProcessing': needsProcessing,
       'otherIssue': otherIssue,
       'otherIssueType': otherIssueType,
       'isPassed': isPassed,
@@ -228,6 +259,13 @@ class CabinetRecord {
       wrongPosition: map['wrongPosition'] as bool? ?? false,
       hangingCable: map['hangingCable'] as bool? ?? false,
       unfixedCable: map['unfixedCable'] as bool? ?? false,
+      shellPassed: map['shellPassed'] as bool? ?? true,
+      hasLabel: map['hasLabel'] as bool? ?? true,
+      saggingPassed: map['saggingPassed'] as bool? ?? true,
+      cleanedPassed: map['cleanedPassed'] as bool? ?? true,
+      subscriberCableNotSagging:
+          map['subscriberCableNotSagging'] as bool? ?? false,
+      needsProcessing: map['needsProcessing'] as bool? ?? true,
       otherIssue: map['otherIssue'] as bool? ?? false,
       otherIssueType: map['otherIssueType'] as String? ?? '',
       isPassed: map['isPassed'] as bool? ?? false,

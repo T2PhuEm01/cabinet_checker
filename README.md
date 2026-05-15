@@ -65,18 +65,20 @@ function doPost(e) {
 		const row = [
 			new Date(),
 			record.id || '',
-			record.name || '',
-			record.route || '',
 			record.latitudeRef ?? '',
 			record.longitudeRef ?? '',
 			record.latitudeActual ?? '',
 			record.longitudeActual ?? '',
-			record.coordinateDeviationMeters ?? '',
-			record.distanceToUserMeters ?? '',
 			normalizeInspectionStatus_(record.inspectionStatus),
 			normalizeYesNo_(record.wrongPosition),
 			normalizeYesNo_(record.hangingCable),
 			normalizeYesNo_(record.unfixedCable),
+			normalizePassStatus_(record.shellPassed),
+			normalizeYesNo_(record.hasLabel),
+			normalizePassStatus_(record.saggingPassed),
+			normalizePassStatus_(record.cleanedPassed),
+			normalizeYesNo_(record.subscriberCableNotSagging),
+			normalizeYesNo_(record.needsProcessing),
 			record.otherIssueType || '',
 			normalizePassStatus_(record.isPassed),
 			normalizeSeverityLabel_(record.severity),
@@ -89,10 +91,10 @@ function doPost(e) {
 
 		sheet.appendRow(row);
 		const appendedRow = sheet.getLastRow();
-		sheet.getRange(appendedRow, 1, 1, 22).setVerticalAlignment('middle');
-		sheet.getRange(appendedRow, 22).setRichTextValue(buildPhotoLinksRichText_(photoLinks));
+		sheet.getRange(appendedRow, 1, 1, 24).setVerticalAlignment('middle');
+		sheet.getRange(appendedRow, 24).setRichTextValue(buildPhotoLinksRichText_(photoLinks));
 		sheet.setRowHeight(appendedRow, 36);
-		formatSheetLayout_(sheet, 22);
+		formatSheetLayout_(sheet, 24);
 		return json_({ ok: true, photosUploaded: photoLinks.length, sheetName: sheet.getName() }, 200);
 	} catch (err) {
 		return json_({ ok: false, error: String(err) }, 500);
@@ -123,18 +125,20 @@ function ensureHeader_(sheet) {
 	const headers = [
 		'Ngày tạo',
 		'Mã tủ',
-		'Tên tủ',
-		'Tuyến',
 		'Lat chuẩn',
 		'Lng chuẩn',
 		'Lat thực tế',
 		'Lng thực tế',
-		'Sai số (m)',
-		'Khoảng cách tới bạn (m)',
 		'Trạng thái',
 		'Lỗi vị trí',
 		'Lỗi treo lơ lửng',
 		'Lỗi cố định cáp',
+		'Vỏ tủ',
+		'Nhãn tủ',
+		'Độ võng',
+		'Tủ đã vệ sinh',
+		'Cáp thuê bao không trùng võng',
+		'Tủ cần xử lý',
 		'Lỗi khác',
 		'Đạt/Không đạt',
 		'Mức độ',
@@ -188,55 +192,51 @@ function formatSheetLayout_(sheet, columnCount) {
 	sheet.setColumnWidth(1, 140);
 
 	// Mã tủ
-	sheet.setColumnWidth(2, 120);
-
-	// Tên tủ
-	sheet.setColumnWidth(3, 180);
-
-	// Tuyến
-	sheet.setColumnWidth(4, 150);
+	sheet.setColumnWidth(2, 180);
 
 	// Lat/Lng
+	sheet.setColumnWidth(3, 130);
+	sheet.setColumnWidth(4, 130);
 	sheet.setColumnWidth(5, 130);
 	sheet.setColumnWidth(6, 130);
-	sheet.setColumnWidth(7, 130);
-	sheet.setColumnWidth(8, 130);
-
-	// Sai số + khoảng cách
-	sheet.setColumnWidth(9, 130);
-	sheet.setColumnWidth(10, 150);
 
 	// Trạng thái
-	sheet.setColumnWidth(11, 140);
+	sheet.setColumnWidth(7, 140);
 
 	// Các lỗi (Co/Khong)
+	sheet.setColumnWidth(8, 120);
+	sheet.setColumnWidth(9, 120);
+	sheet.setColumnWidth(10, 120);
+	sheet.setColumnWidth(11, 120);
 	sheet.setColumnWidth(12, 120);
 	sheet.setColumnWidth(13, 120);
 	sheet.setColumnWidth(14, 120);
-
-	// Lỗi khác
-	sheet.setColumnWidth(15, 160);
-
-	// Đạt / Không đạt
+	sheet.setColumnWidth(15, 180);
 	sheet.setColumnWidth(16, 140);
 
+	// Lỗi khác
+	sheet.setColumnWidth(17, 160);
+
+	// Đạt / Không đạt
+	sheet.setColumnWidth(18, 140);
+
 	// Mức độ
-	sheet.setColumnWidth(17, 120);
+	sheet.setColumnWidth(19, 120);
 
 	// Thời gian kiểm tra
-	sheet.setColumnWidth(18, 170);
+	sheet.setColumnWidth(20, 170);
 
 	// Người kiểm tra
-	sheet.setColumnWidth(19, 160);
+	sheet.setColumnWidth(21, 160);
 
 	// Ghi chú (quan trọng)
-	sheet.setColumnWidth(20, 260);
+	sheet.setColumnWidth(22, 260);
 
 	// Số ảnh
-	sheet.setColumnWidth(21, 90);
+	sheet.setColumnWidth(23, 90);
 
 	// Link ảnh (quan trọng nhất)
-	const linkColumnIndex = 22;
+	const linkColumnIndex = 24;
 
 	if (columnCount >= linkColumnIndex) {
 		sheet.setColumnWidth(linkColumnIndex, 340);
@@ -249,13 +249,13 @@ function formatSheetLayout_(sheet, columnCount) {
 
   // ===== Canh giữa các cột trạng thái =====
   if (lastRow > 1) {
-    sheet.getRange(2, 11, lastRow - 1, 7)
+		sheet.getRange(2, 7, lastRow - 1, 12)
       .setHorizontalAlignment('center');
   }
 
 
   // ===== Tô màu Đạt / Không đạt =====
-  const statusRange = sheet.getRange(2, 16, Math.max(lastRow - 1, 1), 1);
+	const statusRange = sheet.getRange(2, 18, Math.max(lastRow - 1, 1), 1);
 
   let rules = sheet.getConditionalFormatRules();
 
